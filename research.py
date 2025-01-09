@@ -21,7 +21,7 @@ from ultralytics import YOLO
 from squash import Referencepoints, Functions  # Ensure Functions is imported
 from matplotlib import pyplot as plt
 from squash.Ball import Ball
-
+import sys
 print(f"time to import everything: {time.time()-start}")
 alldata = organizeddata = []
 
@@ -153,10 +153,10 @@ def find_last_two(array):
     if len(possibleis) > 1:
         return possibleis[-1]
     return -1
-def find_last(i, other_track_ids):
+def find_last(i, otherTrackIds):
     possibleits = []
-    for it in range(len(other_track_ids)):
-        if other_track_ids[it][1] == i:
+    for it in range(len(otherTrackIds)):
+        if otherTrackIds[it][1] == i:
             possibleits.append(it)
     return possibleits[-1]
 
@@ -292,100 +292,6 @@ def pixel_to_3d(pixel_point, H, rl_reference_points):
         round(interpolated_y, 3),
         round(interpolated_z, 3),
     ]
-def reorganize_shots(alldata, min_sequence=5):
-    if not alldata:
-        return []
-
-    # Filter out None types and replace with "unknown"
-    cleaned_data = [
-        [shot[0] if shot[0] is not None else "unknown"] + shot[1:] for shot in alldata
-    ]
-
-    # Step 1: Group consecutive shots
-    sequences = []
-    current_type = cleaned_data[0][0]
-    current_sequence = []
-
-    for shot in cleaned_data:
-        if shot[0] == current_type:
-            current_sequence.append(shot)
-        else:
-            if len(current_sequence) > 0:
-                sequences.append((current_type, current_sequence))
-            current_type = shot[0]
-            current_sequence = [shot]
-    if current_sequence:
-        sequences.append((current_type, current_sequence))
-
-    # Step 2: Fix short sequences, especially for crosscourts
-    i = 0
-    while i < len(sequences):
-        shot_type = sequences[i][0]
-        if len(sequences[i][1]) < min_sequence and shot_type.lower() == "crosscourt":
-            short_sequence = sequences[i][1]
-
-            # Look for same shot type in adjacent sequences
-            borrowed_shots = []
-
-            # Check forward and backward for shots to borrow
-            for j in range(i + 1, len(sequences)):
-                if sequences[j][0] == shot_type:
-                    available = len(sequences[j][1])
-                    needed = min_sequence - len(short_sequence) - len(borrowed_shots)
-                    if available > min_sequence:
-                        borrowed = sequences[j][1][:needed]
-                        sequences[j] = (sequences[j][0], sequences[j][1][needed:])
-                        borrowed_shots.extend(borrowed)
-                        if len(borrowed_shots) + len(short_sequence) >= min_sequence:
-                            break
-
-            if len(borrowed_shots) + len(short_sequence) < min_sequence:
-                for j in range(i - 1, -1, -1):
-                    if sequences[j][0] == shot_type:
-                        available = len(sequences[j][1])
-                        needed = (
-                            min_sequence - len(short_sequence) - len(borrowed_shots)
-                        )
-                        if available > min_sequence:
-                            borrowed_prev = sequences[j][1][-needed:]
-                            sequences[j] = (sequences[j][0], sequences[j][1][:-needed])
-                            borrowed_shots = borrowed_prev + borrowed_shots
-                            if (
-                                len(borrowed_shots) + len(short_sequence)
-                                >= min_sequence
-                            ):
-                                break
-
-            # Update sequence with borrowed shots
-            if len(borrowed_shots) + len(short_sequence) >= min_sequence:
-                sequences[i] = (shot_type, borrowed_shots + short_sequence)
-            else:
-                # Merge with adjacent sequence if can't borrow enough
-                if i > 0:
-                    sequences[i - 1] = (
-                        sequences[i - 1][0],
-                        sequences[i - 1][1] + short_sequence,
-                    )
-                    sequences.pop(i)
-                    i -= 1
-                elif i < len(sequences) - 1:
-                    sequences[i + 1] = (
-                        sequences[i + 1][0],
-                        short_sequence + sequences[i + 1][1],
-                    )
-                    sequences.pop(i)
-                    i -= 1
-        i += 1
-
-    # Step 3: Format output
-    result = []
-    for shot_type, sequence in sequences:
-        coords = []
-        for shot in sequence:
-            coords.extend([shot[1], shot[2]])
-        result.append([shot_type, len(sequence), coords])
-
-    return result
 def apply_homography(H, points, inverse=False):
     """
     Apply homography transformation to a set of points.
@@ -562,132 +468,6 @@ def is_match_in_play(
     except Exception:
         print(f'got an exception in is_match_in_play')
         return False
-def classify_shot(past_ball_pos, court_width=640, court_height=360, previous_shot=None):
-    """
-    Highly precise shot classification focusing on straight and crosscourt drives
-    Args:
-        past_ball_pos: List of ball positions [(x, y, frame), ...]
-        court_width: Width of court in pixels
-        court_height: Height of court in pixels
-        previous_shot: Previous shot classification for context
-    Returns:
-        [direction, shot_type, wall_hits, displacement_x]
-    """
-    try:
-        if len(past_ball_pos) < 3:
-            return ["straight", "drive", 0, 0]
-
-        # Use more positions for better trajectory analysis
-        if len(past_ball_pos) > 15:  # Increased from 10 to 15 for more precision
-            past_ball_pos = past_ball_pos[-15:]
-
-        # Calculate trajectory metrics
-        horizontal_changes = []
-        velocities = []
-        trajectory_points = []
-
-        for i in range(len(past_ball_pos) - 1):
-            x1, y1, t1 = past_ball_pos[i]
-            x2, y2, t2 = past_ball_pos[i + 1]
-
-            # Track horizontal movement
-            horizontal_changes.append(x2 - x1)
-
-            # Calculate velocity
-            if t2 != t1:
-                velocity = math.sqrt((x2 - x1) ** 2 + (y2 - y1) ** 2) / (t2 - t1)
-                velocities.append(velocity)
-
-            # Store trajectory points for analysis
-            trajectory_points.append((x1, y1))
-        trajectory_points.append((past_ball_pos[-1][0], past_ball_pos[-1][1]))
-
-        # Calculate key positions
-        start_x = past_ball_pos[0][0]
-        end_x = past_ball_pos[-1][0]
-        past_ball_pos[0][1]
-        past_ball_pos[-1][1]
-
-        # Calculate court regions with tighter boundaries
-        mid_court = court_width / 2
-        quarter_court = court_width / 4
-        three_quarter_court = (court_width * 3) / 4
-
-        # Calculate displacement metrics
-        displacement_x = (end_x - start_x) / court_width
-        abs_displacement_x = abs(displacement_x)
-
-        # Initialize variables
-        direction = "straight"
-        shot_type = "drive"
-        wall_hits = count_wall_hits(
-            past_ball_pos, threshold=12
-        )  # Reduced threshold for more sensitivity
-
-        # Enhanced crosscourt detection
-        crosses_court = False
-        trajectory_crossings = 0
-        last_side = "left" if start_x < mid_court else "right"
-
-        # Analyze entire trajectory for court crossings
-        for point in trajectory_points:
-            current_side = "left" if point[0] < mid_court else "right"
-            if current_side != last_side:
-                trajectory_crossings += 1
-                last_side = current_side
-
-        # Determine if shot crosses court based on both endpoints and trajectory
-        crosses_court = (
-            (start_x < mid_court and end_x > mid_court)
-            or (start_x > mid_court and end_x < mid_court)
-            or trajectory_crossings > 0
-        )
-
-        # Calculate trajectory consistency
-        horizontal_consistency = (
-            np.std(horizontal_changes) if len(horizontal_changes) > 0 else 0
-        )
-
-        # Precise direction classification
-        if crosses_court:
-            # Strong crosscourt indicators
-            if (start_x < quarter_court and end_x > three_quarter_court) or (
-                start_x > three_quarter_court and end_x < quarter_court
-            ):
-                direction = "wide_crosscourt"
-            # Moderate crosscourt
-            elif abs_displacement_x > 0.35 and horizontal_consistency < 20:
-                direction = "crosscourt"
-            # Slight crosscourt with consistent trajectory
-            elif abs_displacement_x > 0.2 and horizontal_consistency < 15:
-                direction = "slight_crosscourt"
-            else:
-                direction = (
-                    "straight"  # Default to straight if crosscourt criteria not met
-                )
-        else:
-            # Very tight straight drive
-            if abs_displacement_x < 0.1 and horizontal_consistency < 10:
-                direction = "tight_straight"
-            # Standard straight drive
-            elif abs_displacement_x < 0.2 and horizontal_consistency < 15:
-                direction = "straight"
-            # Slight angle but still straight
-            else:
-                direction = "straight"
-
-        # Consistency check with previous shot
-        if previous_shot and previous_shot[0] == direction:
-            # If consecutive shots have very similar characteristics
-            if abs(displacement_x - previous_shot[3]) < 0.08:  # Tightened threshold
-                direction = previous_shot[0]
-
-        # Return detailed shot information
-        return [direction, shot_type, wall_hits, displacement_x]
-
-    except Exception as e:
-        print(f"Error in shot classification: {str(e)}")
-        return ["straight", "drive", 0, 0]
 def plot_coords(coords_list):
     fig = plt.figure()
     ax = fig.add_subplot(111, projection="3d")
@@ -793,7 +573,7 @@ def load_data(file_path):
 
     return positions
 
-def main(path="main.mp4", frame_width=640, frame_height=360):
+def main(path="main_laptop.mp4", frame_width=640, frame_height=360):
     try:
         print("imported all")
         csvstart = 0
@@ -828,7 +608,6 @@ def main(path="main.mp4", frame_width=640, frame_height=360):
         cv2.VideoWriter(weboutputpath, fourcc, fps, (frame_width, frame_height))
         cv2.VideoWriter(importantoutputpath, fourcc, fps, (frame_width, frame_height))
         out = cv2.VideoWriter(output_path, fourcc, fps, (frame_width, frame_height))
-        cv2.VideoWriter(ballvideopath, fourcc, fps, (frame_width, frame_height))
         detections = []
         plast=[[],[]]
         mainball = Ball(0, 0, 0, 0)
@@ -906,35 +685,10 @@ def main(path="main.mp4", frame_width=640, frame_height=360):
                 sum(references2) / len(references2)
 
             running_frame += 1
-            if running_frame == 1:
-                courtref = np.int64(
-                    sum_pixels_in_bbox(
-                        frame, [0, 0, frame_width, frame_height]
-                    )
-                )
-                referenceimage = frame
-
-            if is_camera_angle_switched(frame, referenceimage, threshold=0.5):
-                continue
-
-            currentref = int(
-                sum_pixels_in_bbox(frame, [0, 0, frame_width, frame_height])
-            )
-
-            if abs(courtref - currentref) > courtref * 0.6:
-                # print("most likely not original camera frame")
-                # print("current ref: ", currentref)
-                # print("court ref: ", courtref)
-                # print(f"frame count: {frame_count}")
-                # print(
-                #     f"difference between current ref and court ref: {abs(courtref - currentref)}"
-                # )
-                continue
             
             ball = ballmodel(frame)
-            detections.append(ball)
 
-            annotated_frame = frame.copy()  # pose_results[0].plot()
+            annotated_frame = frame.copy() 
 
             for reference in reference_points:
                 cv2.circle(
@@ -944,30 +698,98 @@ def main(path="main.mp4", frame_width=640, frame_height=360):
                     (0, 255, 0),
                     2,
                 )
-            # frame, frame_height, frame_width, frame_count, annotated_frame, ballmodel, pose_model, mainball, ball, ballmap, past_ball_pos, ball_false_pos, running_frame
-            # framepose_result=framepose.framepose(pose_model=pose_model, frame=frame, otherTrackIds=otherTrackIds, updated=updated, references1=references1, references2=references2, pixdiffs=pixdiffs, players=players, frame_count=frame_count, player_last_positions=player_last_positions, frame_width=frame_width, frame_height=frame_height, annotated_frame=annotated_frame)
+
+            try:
+                highestconf = 0
+                x1 = x2 = y1 = y2 = 0
+                # Ball detection
+                ball = ballmodel(frame)
+                label = ""
+                try:
+                    # Get the last 10 positions
+                    start_idx = max(0, len(past_ball_pos) - 10)
+                    positions = past_ball_pos[start_idx:]
+                    # Loop through positions
+                    for i in range(len(positions)):
+                        pos = positions[i]
+                        # Draw circle with constant radius
+                        radius = 5  # Adjust as needed
+                        cv2.circle(
+                            annotated_frame, (pos[0], pos[1]), radius, (255, 255, 255), 2
+                        )
+                        # Draw line to next position
+                        if i < len(positions) - 1:
+                            next_pos = positions[i + 1]
+                            cv2.line(
+                                annotated_frame,
+                                (pos[0], pos[1]),
+                                (next_pos[0], next_pos[1]),
+                                (255, 255, 255),
+                                2,
+                            )
+                except Exception:
+                    pass
+                for box in ball[0].boxes:
+                    coords = box.xyxy[0] if len(box.xyxy) == 1 else box.xyxy
+                    x1temp, y1temp, x2temp, y2temp = coords
+                    label = ballmodel.names[int(box.cls)]
+                    confidence = float(box.conf)  # Convert tensor to float
+                    int((x1temp + x2temp) / 2)
+                    int((y1temp + y2temp) / 2)
+
+                    if confidence > highestconf:
+                        highestconf = confidence
+                        x1 = x1temp
+                        y1 = y1temp
+                        x2 = x2temp
+                        y2 = y2temp
+
+                cv2.rectangle(
+                    annotated_frame, (int(x1), int(y1)), (int(x2), int(y2)), (0, 255, 0), 2
+                )
+
+                cv2.putText(
+                    annotated_frame,
+                    f"{label} {highestconf:.2f}",
+                    (int(x1), int(y1) - 10),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.9,
+                    (0, 255, 0),
+                    2,
+                )
+
+                # print(label)
+                cv2.putText(
+                    annotated_frame,
+                    f"Frame: {frame_count}",
+                    (10, 30),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.9,
+                    (0, 255, 0),
+                    2,
+                )
+
+                avg_x = int((x1 + x2) / 2)
+                avg_y = int((y1 + y2) / 2)
+                size = avg_x * avg_y
+                if avg_x > 0 or avg_y > 0:
+                    if mainball.getlastpos()[0] != avg_x or mainball.getlastpos()[1] != avg_y:
+                        mainball.update(avg_x, avg_y, size)
+                        past_ball_pos.append([avg_x, avg_y, running_frame])
+                        math.hypot(
+                            avg_x - mainball.getlastpos()[0], avg_y - mainball.getlastpos()[1]
+                        )
+                        drawmap(
+                            mainball.getloc()[0],
+                            mainball.getloc()[1],
+                            mainball.getlastpos()[0],
+                            mainball.getlastpos()[1],
+                            ballmap,
+                        )
             
-            def framepose(
-                pose_model,
-                frame,
-                other_track_ids,
-                updated,
-                references1,
-                references2,
-                pixdiffs,
-                players,
-                frame_count,
-                player_last_positions,
-                frame_width,
-                frame_height,
-                annotated_frame,
-                max_players=2,
-                occluded=False,
-                importantdata=[],
-                embeddings=[],
-                plast=[[],[]]
-            ):
-                global known_players_features
+                """
+                FRAMEPOSE
+                """
                 try:
                     track_results = pose_model.track(frame, persist=True, show=False)
                     if (
@@ -1003,25 +825,7 @@ def main(path="main.mp4", frame_width=640, frame_height=360):
                                 pass
                         if len(track_ids) > 2:
                             print(f"track ids were greater than 2: {track_ids}")
-                            return [
-                                pose_model,
-                                frame,
-                                other_track_ids,
-                                updated,
-                                references1,
-                                references2,
-                                pixdiffs,
-                                players,
-                                frame_count,
-                                player_last_positions,
-                                frame_width,
-                                frame_height,
-                                annotated_frame,
-                                occluded,
-                                importantdata,
-                                embeddings,
-                                plast
-                            ]
+                            continue
 
                         for box, track_id, kp in zip(boxes, track_ids, keypoints):
                             x, y, w, h = box
@@ -1029,19 +833,17 @@ def main(path="main.mp4", frame_width=640, frame_height=360):
 
                             if player_crop.size == 0:
                                 continue
-                            if not find_match_2d_array(other_track_ids, track_id):
+                            if not find_match_2d_array(otherTrackIds, track_id):
                                 # player 1 has been updated last
                                 if updated[0][1] > updated[1][1]:
                                     if len(references2) > 1:
-                                        other_track_ids.append([track_id, 2])
+                                        otherTrackIds.append([track_id, 2])
                                         print(f"added track id {track_id} to player 2")
                                 else:
-                                    other_track_ids.append([track_id, 1])
+                                    otherTrackIds.append([track_id, 1])
                                     print(f"added track id {track_id} to player 1")
                             # if updated[0], then that means that player 1 was updated last
                             # bc of this, we can assume that the next player is player 2
-                            player_crop_pil = read_image_as_pil(player_crop)
-                            current_embeddings=generate_embeddings(player_crop=player_crop_pil)
                             
                             if track_id == 1:
                                 playerid = 1
@@ -1063,27 +865,6 @@ def main(path="main.mp4", frame_width=640, frame_height=360):
                             else:
                                 print(f"could not find player id for track id {track_id}")
                                 continue
-                            if len(embeddings[1])>0 and len(embeddings[0])>0 and track_id!=1 and track_id!=2:
-                                print(f'track id is : {track_id}')
-                                print(f'player id is : {playerid}')
-                                temp_playerid, tempconf=find_what_player(embeddings[0],embeddings[1],current_embeddings)
-                                print(f'player is most likely: {temp_playerid} with confidence {tempconf}')
-                                print(f'len of embeddings: {len(embeddings[0])} and {len(embeddings[1])}')
-                                playerid=temp_playerid
-                            #given that the first track ids(1 and 2) are always right
-                            """
-                            if track_id==1:
-                                player1_crop=frame[int(y):int(y+h),int(x):int(x+w)]
-                                #convert to PIL image
-                                player1_crop_pil=read_image_as_pil(player1_crop)
-                                player1embeddings=generate_embeddings(player1_crop_pil)
-                                embeddings[0].append(player1embeddings)
-                            if track_id==2:
-                                player2_crop=frame[int(y):int(y+h),int(x):int(x+w)]
-                                player2_crop_pil=read_image_as_pil(player2_crop)
-                                player2embeddings=generate_embeddings(player2_crop_pil)
-                                embeddings[1].append(player2embeddings)
-                            """
                             # If player is already tracked, update their info
                             if playerid in players:
                                 players[playerid].add_pose(kp)
@@ -1095,9 +876,9 @@ def main(path="main.mp4", frame_width=640, frame_height=360):
                                 if playerid == 2:
                                     updated[1][0] = True
                                     updated[1][1] = frame_count
-                            if len(players) < max_players:
-                                players[other_track_ids[track_id][0]] = Player(
-                                    player_id=other_track_ids[track_id][1]
+                            if len(players) < 2:
+                                players[otherTrackIds[track_id][0]] = Player(
+                                    player_id=otherTrackIds[track_id][1]
                                 )
                                 player_last_positions[playerid] = (x, y)
                                 if playerid == 1:
@@ -1167,338 +948,14 @@ def main(path="main.mp4", frame_width=640, frame_height=360):
                         
                         # in the form of [ball shot type, player1 proximity to the ball, player2 proximity to the ball, ]
                         importantdata = []
-                    return [
-                        pose_model,
-                        frame,
-                        other_track_ids,
-                        updated,
-                        references1,
-                        references2,
-                        pixdiffs,
-                        players,
-                        frame_count,
-                        player_last_positions,
-                        frame_width,
-                        frame_height,
-                        annotated_frame,
-                        occluded,
-                        importantdata,
-                        embeddings,
-                        plast
-                    ]
                 except Exception as e:
-                    print(f"framepose error: {e}")
-                    print(f'line was {e.__traceback__.tb_lineno}')
-                    return [
-                        pose_model,
-                        frame,
-                        other_track_ids,
-                        updated,
-                        references1,
-                        references2,
-                        pixdiffs,
-                        players,
-                        frame_count,
-                        player_last_positions,
-                        frame_width,
-                        frame_height,
-                        annotated_frame,
-                        occluded,
-                        importantdata,
-                        embeddings,
-                        plast
-                    ]
-
-
-
-            from sahi.utils.cv import read_image_as_pil
-            # from squash import inferenceslicing
-            # from squash import deepsortframepose
-            def ballplayer_detections(
-                frame,
-                frame_height,
-                frame_width,
-                frame_count,
-                annotated_frame,
-                ballmodel,
-                pose_model,
-                mainball,
-                ball,
-                ballmap,
-                past_ball_pos,
-                ball_false_pos,
-                running_frame,
-                other_track_ids,
-                updated,
-                references1,
-                references2,
-                pixdiffs,
-                players,
-                player_last_positions,
-                occluded,
-                importantdata,
-                embeddings=[[],[]],
-                plast=[[],[]]
-            ):
-                try:
-                    highestconf = 0
-                    x1 = x2 = y1 = y2 = 0
-                    # Ball detection
-                    ball = ballmodel(frame)
-                    label = ""
-                    try:
-                        # Get the last 10 positions
-                        start_idx = max(0, len(past_ball_pos) - 10)
-                        positions = past_ball_pos[start_idx:]
-                        # Loop through positions
-                        for i in range(len(positions)):
-                            pos = positions[i]
-                            # Draw circle with constant radius
-                            radius = 5  # Adjust as needed
-                            cv2.circle(
-                                annotated_frame, (pos[0], pos[1]), radius, (255, 255, 255), 2
-                            )
-                            # Draw line to next position
-                            if i < len(positions) - 1:
-                                next_pos = positions[i + 1]
-                                cv2.line(
-                                    annotated_frame,
-                                    (pos[0], pos[1]),
-                                    (next_pos[0], next_pos[1]),
-                                    (255, 255, 255),
-                                    2,
-                                )
-                    except Exception:
-                        pass
-                    for box in ball[0].boxes:
-                        coords = box.xyxy[0] if len(box.xyxy) == 1 else box.xyxy
-                        x1temp, y1temp, x2temp, y2temp = coords
-                        label = ballmodel.names[int(box.cls)]
-                        confidence = float(box.conf)  # Convert tensor to float
-                        int((x1temp + x2temp) / 2)
-                        int((y1temp + y2temp) / 2)
-
-                        if confidence > highestconf:
-                            highestconf = confidence
-                            x1 = x1temp
-                            y1 = y1temp
-                            x2 = x2temp
-                            y2 = y2temp
-
-                    cv2.rectangle(
-                        annotated_frame, (int(x1), int(y1)), (int(x2), int(y2)), (0, 255, 0), 2
-                    )
-
-                    cv2.putText(
-                        annotated_frame,
-                        f"{label} {highestconf:.2f}",
-                        (int(x1), int(y1) - 10),
-                        cv2.FONT_HERSHEY_SIMPLEX,
-                        0.9,
-                        (0, 255, 0),
-                        2,
-                    )
-
-                    # print(label)
-                    cv2.putText(
-                        annotated_frame,
-                        f"Frame: {frame_count}",
-                        (10, 30),
-                        cv2.FONT_HERSHEY_SIMPLEX,
-                        0.9,
-                        (0, 255, 0),
-                        2,
-                    )
-
-                    avg_x = int((x1 + x2) / 2)
-                    avg_y = int((y1 + y2) / 2)
-                    size = avg_x * avg_y
-                    if avg_x > 0 or avg_y > 0:
-                        if mainball.getlastpos()[0] != avg_x or mainball.getlastpos()[1] != avg_y:
-                            mainball.update(avg_x, avg_y, size)
-                            past_ball_pos.append([avg_x, avg_y, running_frame])
-                            math.hypot(
-                                avg_x - mainball.getlastpos()[0], avg_y - mainball.getlastpos()[1]
-                            )
-                            drawmap(
-                                mainball.getloc()[0],
-                                mainball.getloc()[1],
-                                mainball.getlastpos()[0],
-                                mainball.getlastpos()[1],
-                                ballmap,
-                            )
-                    """
-                    FRAMEPOSE
-                    """
-                    # going to take frame, sum_pixels_in_bbox, otherTrackIds, updated, player1+2imagereference, pixdiffs, refrences1+2, players,
-                    framepose_result = framepose(
-                        pose_model=pose_model,
-                        frame=frame,
-                        other_track_ids=other_track_ids,
-                        updated=updated,
-                        references1=references1,
-                        references2=references2,
-                        pixdiffs=pixdiffs,
-                        players=players,
-                        frame_count=frame_count,
-                        player_last_positions=player_last_positions,
-                        frame_width=frame_width,
-                        frame_height=frame_height,
-                        annotated_frame=annotated_frame,
-                        occluded=occluded,
-                        importantdata=importantdata,
-                        embeddings=embeddings,
-                        plast=plast
-                    )
-                    other_track_ids = framepose_result[2]
-                    updated = framepose_result[3]
-                    references1 = framepose_result[4]
-                    references2 = framepose_result[5]
-                    pixdiffs = framepose_result[6]
-                    players = framepose_result[7]
-                    player_last_positions = framepose_result[9]
-                    annotated_frame = framepose_result[12]
-                    occluded = framepose_result[13]
-                    importantdata = framepose_result[14]
-                    embeddings = framepose_result[15]
-                    who_hit = determine_ball_hit(players, past_ball_pos)
-                    print(f'is rally on: {is_rally_on(plast)}')
-                    return [
-                        frame,  # 0
-                        frame_count,  # 1
-                        annotated_frame,  # 2
-                        mainball,  # 3
-                        ball,  # 4
-                        ballmap,  # 5
-                        past_ball_pos,  # 6
-                        ball_false_pos,  # 7
-                        running_frame,  # 8
-                        other_track_ids,  # 9
-                        updated,  # 10
-                        references1,  # 11
-                        references2,  # 12
-                        pixdiffs,  # 13
-                        players,  # 14
-                        player_last_positions,  # 15
-                        occluded,  # 16
-                        importantdata,  # 17
-                        who_hit,  # 18
-                        embeddings, # 19
-                        plast #20
-                    ]
-                except Exception as e:
-                    print(f'error in ballplayer_detections: {e}')
-                    return [
-                        frame,  # 0
-                        frame_count,  # 1
-                        annotated_frame,  # 2
-                        mainball,  # 3
-                        ball,  # 4
-                        ballmap,  # 5
-                        past_ball_pos,  # 6
-                        ball_false_pos,  # 7
-                        running_frame,  # 8
-                        other_track_ids,  # 9
-                        updated,  # 10
-                        references1,  # 11
-                        references2,  # 12
-                        pixdiffs,  # 13
-                        players,  # 14
-                        player_last_positions,  # 15
-                        occluded,  # 16
-                        importantdata,  # 17
-                        who_hit,  # 18
-                        embeddings, # 19
-                        plast, #20
-                    ]
-            
-            
-            detections_result = ballplayer_detections(
-                frame=frame,
-                frame_height=frame_height,
-                frame_width=frame_width,
-                frame_count=frame_count,
-                annotated_frame=annotated_frame,
-                ballmodel=ballmodel,
-                pose_model=pose_model,
-                mainball=mainball,
-                ball=ball,
-                ballmap=ballmap,
-                past_ball_pos=past_ball_pos,
-                ball_false_pos=ball_false_pos,
-                running_frame=running_frame,
-                other_track_ids=otherTrackIds,
-                updated=updated,
-                references1=references1,
-                references2=references2,
-                pixdiffs=pixdiffs,
-                players=players,
-                player_last_positions=player_last_positions,
-                occluded=False,
-                importantdata=[],
-                embeddings=embeddings,
-                plast=plast,
-            )
-            frame = detections_result[0]
-            frame_count = detections_result[1]
-            annotated_frame = detections_result[2]
-            mainball = detections_result[3]
-            ball = detections_result[4]
-            ballmap = detections_result[5]
-            past_ball_pos = detections_result[6]
-            ball_false_pos = detections_result[7]
-            running_frame = detections_result[8]
-            otherTrackIds = detections_result[9]
-            updated = detections_result[10]
-            references1 = detections_result[11]
-            references2 = detections_result[12]
-            pixdiffs = detections_result[13]
-            players = detections_result[14]
-            player_last_positions = detections_result[15]
-            detections_result[16]
-            idata = detections_result[17]
-            who_hit = detections_result[18]
-            embeddings=detections_result[19]
-            plast=detections_result[20]
-            # print(f'who_hit: {who_hit}')
-            if idata:
-                alldata.append(idata)
-            # print(f"occluded: {occluded}")
-            # occluded structured as [[players_found, last_pos_p1, last_pos_p2, frame_number]...]
-            # print(f'is match in play: {is_match_in_play(players, mainball)}')
-            match_in_play = is_match_in_play(players, past_ball_pos)
-            type_of_shot = classify_shot(past_ball_pos=past_ball_pos)
-            if match_in_play is not False:
-                ball_hit = match_in_play[1]
-            else:
-                ball_hit = False
-            try:
-                reorganize_shots(alldata)
-                # print(f"organized data: {organizeddata}")
+                    print(f"got error in framepose: {e}")
+                    print(f"line number was {sys.exc_info()[-1].tb_lineno}")
+                    continue
             except Exception as e:
-                print(f"error reorganizing: {e}")
-                pass
-            if match_in_play is not False:
-                # print(match_in_play)
-                cv2.putText(
-                    annotated_frame,
-                    f"ball hit: {str(match_in_play[1])}",
-                    (10, frame_height - 100),
-                    cv2.FONT_HERSHEY_SIMPLEX,
-                    0.4,
-                    (255, 255, 255),
-                    1,
-                )
-                cv2.putText(
-                    annotated_frame,
-                    f"shot type: {type_of_shot}",
-                    (10, frame_height - 140),
-                    cv2.FONT_HERSHEY_SIMPLEX,
-                    0.4,
-                    (255, 255, 255),
-                    1,
-                )
-            # Display ankle positions of both players
+                print(f'got error in ballplayer detections: {e}')
+                print(f'line number was {sys.exc_info()[-1].tb_lineno}')
+                continue
             if players.get(1) and players.get(2) is not None:
                 if (
                     players.get(1).get_latest_pose()
@@ -1619,39 +1076,6 @@ def main(path="main.mp4", frame_width=640, frame_height=360):
                         (255, 255, 255),
                         1,
                     )
-                    is_rally= is_rally_on(plast)
-                    cv2.putText(
-                        annotated_frame,
-                        f'is rally on: {is_rally_on(plast)}',
-                        (10, frame_height - 120),
-                        cv2.FONT_HERSHEY_SIMPLEX,
-                        0.4,
-                        (255, 255, 255),
-                        1,
-                    )
-                    # Create a live updating plot window
-                    # plt.figure(
-                    #     2
-                    # )  # Use figure 2 for the distance plot (figure 1 is the video)
-                    # plt.clf()  # Clear the current figure
-                    # plt.plot(p1distancesfromT, color="red", label="P1 Distance from T")
-                    # plt.plot(p2distancesfromT, color="blue", label="P2 Distance from T")
-
-                    # # Add labels and title
-                    # plt.xlabel("Time (frames)")
-                    # plt.ylabel("Distance from T(pixels)")
-                    # plt.title("Distance from T over Time")
-                    # plt.legend()
-                    # plt.grid(True)
-
-                    # # Update the plot window
-                    # plt.draw()
-                    # plt.pause(0.0001)  # Small pause to allow the window to update
-
-                    # # Save the plot to a file
-                    # plt.savefig("output/distance_from_t_over_time.png")
-
-            # Display the annotated frame
             try:
                 # Generate player ankle heatmap
                 if (
@@ -1754,13 +1178,6 @@ def main(path="main.mp4", frame_width=640, frame_height=360):
                                 -1,
                             )
 
-                            # cv2.circle(
-                            #    annotated_frame,
-                            #    (next_pos[0], next_pos[1]),
-                            #    5,
-                            #    (0, 255, 0),
-                            #    -1,
-                            # )
 
             for ball_pos in ballxy:
                 if frame_count - ball_pos[2] < 7:
@@ -1769,167 +1186,8 @@ def main(path="main.mp4", frame_width=640, frame_height=360):
                         annotated_frame, (ball_pos[0], ball_pos[1]), 5, (0, 255, 0), -1
                     )
 
-            positions = load_data("output\\ball-xyn.txt")
-            if len(positions) > 11:
-                input_sequence = np.array([positions[-10:]])
-                input_sequence = input_sequence.reshape((1, 10, 2, 1))
-                predicted_pos = ball_predict(input_sequence)
-                # print(f'input_sequence: {input_sequence}')
-                cv2.circle(
-                    annotated_frame,
-                    (
-                        int(predicted_pos[0][0] * frame_width),
-                        int(predicted_pos[0][1] * frame_height),
-                    ),
-                    7,
-                    (0, 0, 255),
-                    7,
-                )
-                cv2.putText(
-                    annotated_frame,
-                    f"predicted ball position in 1 frame: {int(predicted_pos[0][0]*frame_width)},{int(predicted_pos[0][1]*frame_height)}",
-                    (
-                        int(predicted_pos[0][0] * frame_width),
-                        int(predicted_pos[0][1] * frame_height),
-                    ),
-                    cv2.FONT_HERSHEY_SIMPLEX,
-                    0.4,
-                    (255, 255, 255),
-                    1,
-                )
-                last9 = positions[-9:]
-                last9.append([predicted_pos[0][0], predicted_pos[0][1]])
-                # print(f'last 9: {last9}')
-                sequence_and_predicted = np.array(last9)
-                # print(f'sequence and predicted: {sequence_and_predicted}')
-                sequence_and_predicted = sequence_and_predicted.reshape((1, 10, 2, 1))
-                future_predict = ball_predict(sequence_and_predicted)
-                cv2.circle(
-                    annotated_frame,
-                    (
-                        int(future_predict[0][0] * frame_width),
-                        int(future_predict[0][1] * frame_height),
-                    ),
-                    7,
-                    (255, 0, 0),
-                    7,
-                )
-                cv2.putText(
-                    annotated_frame,
-                    f"predicted ball position in 3 frames: {int(future_predict[0][0]*frame_width)},{int(future_predict[0][1]*frame_height)}",
-                    (
-                        int(future_predict[0][0] * frame_width),
-                        int(future_predict[0][1] * frame_height),
-                    ),
-                    cv2.FONT_HERSHEY_SIMPLEX,
-                    0.4,
-                    (255, 255, 255),
-                    1,
-                )
-            if (
-                players.get(1)
-                and players.get(2) is not None
-                and (
-                    players.get(1).get_last_x_poses(3) is not None
-                    and players.get(2).get_last_x_poses(3) is not None
-                )
-            ):
-                players.get(1).get_last_x_poses(3).xyn[0]
-                players.get(2).get_last_x_poses(3).xyn[0]
-                rlp1postemp = [
-                    players.get(1).get_last_x_poses(3).xyn[0][16][0] * frame_width,
-                    players.get(1).get_last_x_poses(3).xyn[0][16][1] * frame_height,
-                ]
-                rlp2postemp = [
-                    players.get(2).get_last_x_poses(3).xyn[0][16][0] * frame_width,
-                    players.get(2).get_last_x_poses(3).xyn[0][16][1] * frame_height,
-                ]
-                rlworldp1 = pixel_to_3d(
-                    rlp1postemp, homography, reference_points_3d
-                )
-                rlworldp2 = pixel_to_3d(
-                    rlp2postemp, homography, reference_points_3d
-                )
-                text5 = f"Player 1: {rlworldp1}"
-                text6 = f"Player 2: {rlworldp2}"
-
-                cv2.putText(
-                    annotated_frame,
-                    text5,
-                    (10, 50),
-                    cv2.FONT_HERSHEY_SIMPLEX,
-                    0.4,
-                    (255, 255, 255),
-                    1,
-                )
-                cv2.putText(
-                    annotated_frame,
-                    text6,
-                    (10, 70),
-                    cv2.FONT_HERSHEY_SIMPLEX,
-                    0.4,
-                    (255, 255, 255),
-                    1,
-                )
-            rlball = pixel_to_3d(
-                [past_ball_pos[-1][0], past_ball_pos[-1][1]],
-                homography,
-                reference_points_3d,
-            )
             
-
-            def csvwrite():
-                with open("output/final.csv", "a") as f:
-                    csvwriter = csv.writer(f)
-                    # going to be putting the framecount, playerkeypoints, ball position, time, type of shot, and also match in play
-                    running_frame / fps
-                    shot = (
-                        "None"
-                        if type_of_shot is None
-                        else type_of_shot[0] + " " + type_of_shot[1]
-                    )
-                    data = [
-                        running_frame,
-                        players.get(1).get_latest_pose().xyn[0].tolist(),
-                        players.get(2).get_latest_pose().xyn[0].tolist(),
-                        mainball.getloc(),
-                        shot,
-                        rlworldp1,
-                        rlworldp2,
-                        rlball,
-                        f"{who_hit} hit the ball",
-                    ]
-                    # print(data)
-                    csvwriter.writerow(data)
-
-            # print(past_ball_pos)
-            if past_ball_pos is not None:
-                text = f"ball in rlworld: {pixel_to_3d([past_ball_pos[-1][0],past_ball_pos[-1][1]], homography, reference_points_3d)}"
-                cv2.putText(
-                    annotated_frame,
-                    text,
-                    (10, 90),
-                    cv2.FONT_HERSHEY_SIMPLEX,
-                    0.4,
-                    (255, 255, 255),
-                    1,
-                )
-            try:
-                csvwrite()
-            except Exception as e:
-                print(f"error: {e}")
-                pass
-            if running_frame > end:
-                try:
-                    with open("final.txt", "a") as f:
-                        f.write(
-                            csvanalyze.parse_through(csvstart, end, "output/final.csv")
-                        )
-                    csvstart = end
-                    end += 100
-                except Exception as e:
-                    print(f"error: {e}")
-                    pass
+            
             out.write(annotated_frame)
             cv2.imshow("Annotated Frame", annotated_frame)
 
