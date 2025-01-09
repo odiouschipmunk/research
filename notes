@@ -1,0 +1,5 @@
+add more data to the matplotlib chart about the distance from t over time; add when ball was hit(maybe as shading?), who hit, what kind of shot, etc.
+pixel 2d coords to 3d meter coords by using court as refrence point, working with angles and all
+player detection even through occlusion
+finding false positives with the ball(where it goes too often?)
+better shot detection
