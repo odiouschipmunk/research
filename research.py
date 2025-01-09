@@ -1,29 +1,79 @@
+from re import I
 import time
-import torch
 start = time.time()
 import cv2
-import csv
-from PIL import Image
-import torch.nn.functional as F
-import time
-import csvanalyze
+import json, os, csv, math, logging
 import logging
 import math
 import numpy as np
-import matplotlib
-import clip
 from squash.Player import Player
-from skimage.metrics import structural_similarity as ssim_metric
-matplotlib.use("TkAgg")
-import tensorflow as tf
-import matplotlib.pyplot as plt
 from ultralytics import YOLO
-from squash import Referencepoints, Functions  # Ensure Functions is imported
 from matplotlib import pyplot as plt
 from squash.Ball import Ball
 import sys
 print(f"time to import everything: {time.time()-start}")
 alldata = organizeddata = []
+def get_reference_points(path, frame_width, frame_height):
+    # Mouse callback function to capture click events
+    def click_event(event, x, y, flags, params):
+        if event == cv2.EVENT_LBUTTONDOWN:
+            reference_points.append((x, y))
+            print(f"Point captured: ({x}, {y})")
+            cv2.circle(frame1, (x, y), 5, (0, 255, 0), -1)
+            cv2.imshow("Court", frame1)
+
+    # Function to save reference points to a file
+    def save_reference_points(file_path):
+        with open(file_path, "w") as f:
+            json.dump(reference_points, f)
+        print(f"reference points saved to {file_path}")
+
+    # Function to load reference points from a file
+    def load_reference_points(file_path):
+        global reference_points
+        with open(file_path, "r") as f:
+            reference_points = json.load(f)
+        print(f"reference points loaded from {file_path}")
+
+    # Load the frame (replace 'path_to_frame' with the actual path)
+    if os.path.isfile("reference_points.json"):
+        load_reference_points("reference_points.json")
+        print(f"Loaded reference points: {reference_points}")
+        return reference_points
+    else:
+        print(
+            "No reference points file found. Please click on the court to set reference points."
+        )
+        frame_count = 1
+        cap2 = cv2.VideoCapture(path)
+        frame1 = None
+        while cap2.isOpened():
+            success, frame = cap2.read()
+            if not success:
+                break
+            frame_count += 1
+            if frame_count == 100:
+                frame1 = frame
+                break
+        frame1 = cv2.resize(frame1, (frame_width, frame_height))
+        cv2.imshow("Court", frame1)
+        cv2.setMouseCallback("Court", click_event)
+
+        print(
+            "Click on the key points of the court. Press 's' to save and 'q' to quit.\nMake sure to click in the following order shown by the example"
+        )
+        example_image = cv2.imread("output/annotated-squash-court.png")
+        example_image_resized = cv2.resize(example_image, (frame_width, frame_height))
+        cv2.imshow("Court Example", example_image_resized)
+        while True:
+            key = cv2.waitKey(1) & 0xFF
+            if key == ord("s"):
+                save_reference_points("reference_points.json")
+                cv2.destroyAllWindows()
+                return reference_points
+            elif key == ord("q"):
+                cv2.destroyAllWindows()
+                return reference_points
 
 
 def find_match_2d_array(array, x):
@@ -40,451 +90,39 @@ def drawmap(lx, ly, rx, ry, map):
     map[ly, lx] += 1
     map[ry, rx] += 1
 
-def visualize_court_positions(player1_pos, player2_pos, pixel_reference, real_reference, court_scale=100):
-    """
-    Create a top-down visualization of player positions on a squash court.
+def cleanwrite(home_path):
+    #if not os.path.exists(home_path), then create the file
+    if not os.path.exists(home_path):
+        os.makedirs(home_path, exist_ok=True)
     
-    Args:
-        player1_pos (list): [x,y] pixel coordinates of player 1
-        player2_pos (list): [x,y] pixel coordinates of player 2
-        pixel_reference (list): List of [x,y] pixel reference points
-        real_reference (list): List of [x,y,z] real-world reference points in meters
-        court_scale (int): Pixels per meter for visualization
-        
-    Returns:
-        np.ndarray: Court visualization image
-    """
-    # Standard squash court dimensions in meters
-    COURT_LENGTH = 9.75
-    COURT_WIDTH = 6.4
-    
-    # Create blank canvas with white background
-    canvas_height = int(COURT_LENGTH * court_scale)
-    canvas_width = int(COURT_WIDTH * court_scale)
-    court = np.ones((canvas_height, canvas_width, 3), dtype=np.uint8) * 255
-    
-    # Draw court lines
-    # Main court outline
-    cv2.rectangle(court, (0, 0), (canvas_width-1, canvas_height-1), (0,0,0), 2)
-    
-    # Service line
-    service_line_y = int(5.49 * court_scale)
-    cv2.line(court, (0, service_line_y), (canvas_width, service_line_y), (0,0,0), 2)
-    
-    # Short line
-    short_line_y = int(4.26 * court_scale)
-    cv2.line(court, (0, short_line_y), (canvas_width, short_line_y), (0,0,0), 2)
-    
-    # Half court line
-    half_court_x = int(COURT_WIDTH/2 * court_scale)
-    cv2.line(court, (half_court_x, short_line_y), (half_court_x, canvas_height), (0,0,0), 2)
-    
-    # Calculate homography matrix
-    pixel_reference_np = np.array(pixel_reference, dtype=np.float32)
-    real_reference_np = np.array([(p[0], p[1]) for p in real_reference], dtype=np.float32)
-    H, _ = cv2.findHomography(pixel_reference_np, real_reference_np)
-    
-    # Transform player positions to real-world coordinates
-    players = [player1_pos, player2_pos]
-    colors = [(0,0,255), (255,0,0)]  # Red for player 1, Blue for player 2
-    
-    for player_pos, color in zip(players, colors):
-        # Convert to homogeneous coordinates
-        player_pixel = np.array([player_pos[0], player_pos[1], 1])
-        
-        # Apply homography
-        player_real = np.dot(H, player_pixel)
-        player_real /= player_real[2]
-        
-        # Convert to court coordinates
-        court_x = int(player_real[0] * court_scale)
-        court_y = int(player_real[1] * court_scale)
-        
-        # Draw player on court
-        cv2.circle(court, (court_x, court_y), 10, color, -1)
-        
-    # Add legend
-    cv2.putText(court, "Player 1", (10, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0,0,255), 1)
-    cv2.putText(court, "Player 2", (10, 40), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255,0,0), 1)
-    
-    return court
-def find_last_one(array):
-    possibleis = []
-    for i in range(len(array)):
-        if array[i][1] == 1:
-            possibleis.append(i)
-    # print(possibleis)
-    if len(possibleis) > 1:
-        return possibleis[-1]
-
-    return -1
-def cleanwrite():
-    with open("output/ball.txt", "w") as f:
+    with open(f"{home_path}/ball.txt", "w") as f:
         f.write("")
-    with open("output/player1.txt", "w") as f:
+    with open(f"{home_path}/player1.txt", "w") as f:
         f.write("")
-    with open("output/player2.txt", "w") as f:
+    with open(f"{home_path}/player2.txt", "w") as f:
         f.write("")
-    with open("output/ball-xyn.txt", "w") as f:
+    with open(f"{home_path}/ball-xyn.txt", "w") as f:
         f.write("")
-    with open("output/read_ball.txt", "w") as f:
+    with open(f"{home_path}/read_ball.txt", "w") as f:
         f.write("")
-    with open("output/read_player1.txt", "w") as f:
+    with open(f"{home_path}/read_player1.txt", "w") as f:
         f.write("")
-    with open("output/read_player2.txt", "w") as f:
+    with open(f"{home_path}/read_player2.txt", "w") as f:
         f.write("")
-    with open("output/final.json", "w") as f:
+    with open(f"{home_path}/final.json", "w") as f:
         f.write("[")
-    with open("output/final.csv", "w") as f:
+    with open(f"{home_path}/final.csv", "w") as f:
         f.write(
             "Frame count,Player 1 Keypoints,Player 2 Keypoints,Ball Position,Shot Type,Player 1 RL World Position,Player 2 RL World Position,Ball RL World Position,Who Hit the Ball\n"
         )
-def get_data(length):
-    # go through the data in the file output/final.csv and then return all the data in a list
-    for i in range(0, length):
-        with open("output/final.csv", "r") as f:
-            data = f.read()
-    return data
-def find_last_two(array):
-    possibleis = []
-    for i in range(len(array)):
-        if array[i][1] == 2:
-            possibleis.append(i)
-    if len(possibleis) > 1:
-        return possibleis[-1]
-    return -1
+
+
 def find_last(i, otherTrackIds):
     possibleits = []
     for it in range(len(otherTrackIds)):
         if otherTrackIds[it][1] == i:
             possibleits.append(it)
     return possibleits[-1]
-
-def pixel_to_3d_pixel_reference(pixel_point, pixel_reference, reference_points_3d):
-    """
-    Maps a single 2D pixel coordinate to a 3D position based on reference points.
-
-    Parameters:
-        pixel_point (list): Single [x, y] pixel coordinate to map.
-        pixel_reference (list): List of [x, y] reference points in pixels.
-        reference_points_3d (list): List of [x, y, z] reference points in 3D space.
-
-    Returns:
-        list: Mapped 3D coordinates in the form [x, y, z].
-    """
-    # Convert 2D reference points and 3D points to NumPy arrays
-    pixel_reference_np = np.array(pixel_reference, dtype=np.float32)
-    reference_points_3d_np = np.array(reference_points_3d, dtype=np.float32)
-
-    # Extract only the x and y values from the 3D reference points for homography calculation
-    reference_points_2d = reference_points_3d_np[:, :2]
-
-    # Calculate the homography matrix from 2D pixel reference to 2D real-world reference (ignoring z)
-    H, _ = cv2.findHomography(pixel_reference_np, reference_points_2d)
-
-    # Ensure pixel_point is in homogeneous coordinates [x, y, 1]
-    pixel_point_homogeneous = np.array(
-        [pixel_point[0], pixel_point[1], 1], dtype=np.float32
-    )
-
-    # Apply the homography matrix to get a 2D point in real-world space
-    real_world_2d = np.dot(H, pixel_point_homogeneous)
-    real_world_2d /= real_world_2d[2]  # Normalize to make it [x, y, 1]
-
-    # Now interpolate the z-coordinate based on distances
-    # Calculate weights based on the nearest reference points in the 2D plane
-    distances = np.linalg.norm(reference_points_2d - real_world_2d[:2], axis=1)
-    weights = 1 / (distances + 1e-5)  # Avoid division by zero
-    z_mapped = np.dot(weights, reference_points_3d_np[:, 2]) / np.sum(weights)
-
-    # Combine the 2D mapped point with interpolated z to get the 3D position
-    mapped_3d_point = [real_world_2d[0], real_world_2d[1], z_mapped]
-
-    return mapped_3d_point
-
-def validate_reference_points(px_points, rl_points):
-    """
-    Validate reference points for homography calculation.
-
-    Parameters:
-        px_points: List of pixel coordinates [[x, y], ...]
-        rl_points: List of real-world coordinates [[X, Y, Z], ...] or [[X, Y], ...]
-
-    Returns:
-        Tuple[bool, str]: (is_valid, error_message)
-    """
-    if len(px_points) != len(rl_points):
-        return False, "Number of pixel and real-world points must match"
-
-    if len(px_points) < 4:
-        return False, "At least 4 point pairs are required for homography calculation"
-
-    # Check pixel points format
-    if not all(len(p) == 2 for p in px_points):
-        return False, "Pixel points must be 2D coordinates [x, y]"
-
-    # Check real-world points format
-    if not all(len(p) in [2, 3] for p in rl_points):
-        return (
-            False,
-            "Real-world points must be either 2D [X, Y] or 3D [X, Y, Z] coordinates",
-        )
-
-    return True, ""
-def generate_homography(points_2d, points_3d):
-    """
-    Generate homography matrix from 2D pixel coordinates to 3D real world coordinates
-    Args:
-        points_2d: List of [x,y] pixel coordinates
-        points_3d: List of [x,y,z] real world coordinates in meters
-    Returns:
-        3x3 homography matrix
-    """
-    # Convert to numpy arrays
-    src_pts = np.array(points_2d, dtype=np.float32)
-    dst_pts = np.array(points_3d, dtype=np.float32)
-
-    # Remove y coordinate from 3D points since we're working on court plane
-    dst_pts = np.delete(dst_pts, 1, axis=1)
-
-    # Calculate homography matrix
-    H, status = cv2.findHomography(src_pts, dst_pts, cv2.RANSAC, 5.0)
-
-    return H
-def pixel_to_3d(pixel_point, H, rl_reference_points):
-    """
-    Convert a pixel point to an interpolated 3D real-world point using the homography matrix.
-
-    Parameters:
-        pixel_point (list): Pixel coordinate [x, y] to transform.
-        H (np.array): Homography matrix from `generate_homography`.
-        rl_reference_points (list): List of real-world coordinates [[X, Y, Z], ...].
-
-    Returns:
-        list: Estimated interpolated 3D coordinate in the form [X, Y, Z].
-    """
-    # Convert pixel point to homogeneous coordinates
-    pixel_point_homogeneous = np.array([*pixel_point, 1])
-
-    # Map pixel point to real-world 2D using the homography matrix
-    real_world_2d = np.dot(H, pixel_point_homogeneous)
-    real_world_2d /= real_world_2d[2]  # Normalize to get actual coordinates
-
-    # Convert real-world reference points to NumPy array
-    rl_reference_points_np = np.array(rl_reference_points, dtype=np.float32)
-
-    # Calculate distances in the X-Y plane
-    distances = np.linalg.norm(
-        rl_reference_points_np[:, :2] - real_world_2d[:2], axis=1
-    )
-
-    # Calculate weights inversely proportional to distances for interpolation
-    weights = 1 / (distances + 1e-6)  # Avoid division by zero with epsilon
-    weights /= weights.sum()  # Normalize weights to sum to 1
-
-    # Perform weighted interpolation for the X, Y, and Z coordinates
-    interpolated_x = np.dot(weights, rl_reference_points_np[:, 0])
-    interpolated_y = np.dot(weights, rl_reference_points_np[:, 1])
-    interpolated_z = np.dot(weights, rl_reference_points_np[:, 2])
-
-    return [
-        round(interpolated_x, 3),
-        round(interpolated_y, 3),
-        round(interpolated_z, 3),
-    ]
-def apply_homography(H, points, inverse=False):
-    """
-    Apply homography transformation to a set of points.
-
-    Parameters:
-        H: 3x3 homography matrix
-        points: List of points to transform [[x, y], ...]
-        inverse: If True, applies inverse transformation
-
-    Returns:
-        np.ndarray: Transformed points
-    """
-    try:
-        points = np.array(points, dtype=np.float32)
-        if points.ndim == 1:
-            points = points.reshape(1, 2)
-
-        if inverse:
-            H = np.linalg.inv(H)
-
-        # Reshape points to Nx1x2 format required by cv2.perspectiveTransform
-        points_reshaped = points.reshape(-1, 1, 2)
-
-        # Apply transformation
-        transformed_points = cv2.perspectiveTransform(points_reshaped, H)
-
-        return transformed_points.reshape(-1, 2)
-
-    except Exception as e:
-        raise ValueError(f"Error in apply_homography: {str(e)}")
-frame_height = 360
-frame_width = 640
-def shot_type(past_ball_pos, threshold=3):
-    # go through the past threshold number of past ball positions and see what kind of shot it is
-    # past_ball_pos ordered as [[x,y,frame_number], ...]
-    if len(past_ball_pos) < threshold:
-        return None
-    threshballpos = past_ball_pos[-threshold:]
-    # check for crosscourt or straight shots
-    xdiff = threshballpos[-1][0] - threshballpos[0][0]
-    ydiff = threshballpos[-1][1] - threshballpos[0][1]
-    typeofshot = ""
-    if xdiff < 50 and ydiff < 50:
-        typeofshot = "straight"
-    else:
-        typeofshot = "crosscourt"
-    # check how high the ball has moved
-    maxheight = 0
-    height = ""
-    for i in range(1, len(threshballpos)):
-        if threshballpos[i][1] > maxheight:
-            maxheight = threshballpos[i][1]
-            # print(f"{threshballpos[i]}")
-            # print(f'maxheight: {maxheight}')
-            # print(f'threshballpos[i][1]: {threshballpos[i][1]}')
-    if maxheight < (frame_height) / 1.35:
-        height += "lob"
-        # print(f'max height was {maxheight} and thresh was {(1.5*frame_height)/2}')
-    else:
-        height += "drive"
-    return typeofshot + " " + height
-def is_camera_angle_switched(frame, reference_image, threshold=0.5):
-    frame_gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-    reference_image_gray = cv2.cvtColor(reference_image, cv2.COLOR_BGR2GRAY)
-    score, _ = ssim_metric(reference_image_gray, frame_gray, full=True)
-    return score < threshold
-def is_match_in_play(
-    players,
-    pastballpos,
-    movement_threshold=0.2 * frame_width,
-    hit=0.15 * frame_height,
-    ballthreshold=5,
-    ball_angle_thresh=50,
-    ball_velocity_thresh=3,
-):
-    if players.get(1) is None or players.get(2) is None or pastballpos is None:
-        return False
-    try:
-        lastplayer1pos = []
-        threshold=ballthreshold
-        lastplayer2pos = []
-        lastballpos = []
-        ball_hit = player_move = False
-        # lastplayerxpos in the format of [[lanklex, lankley], [ranklex, rankley]]
-        lastplayer1pos.append(
-            [
-                players.get(1).get_last_x_poses(1).xyn[0][15][0] * frame_width,
-                players.get(1).get_last_x_poses(1).xyn[0][15][1] * frame_height,
-            ]
-        )
-        lastplayer2pos.append(
-            [
-                players.get(2).get_last_x_poses(1).xyn[0][15][0] * frame_width,
-                players.get(2).get_last_x_poses(1).xyn[0][15][1] * frame_height,
-            ]
-        )
-        lastplayer1pos.append(
-            [
-                players.get(1).get_last_x_poses(1).xyn[0][16][0] * frame_width,
-                players.get(1).get_last_x_poses(1).xyn[0][16][1] * frame_height,
-            ]
-        )
-        lastplayer2pos.append(
-            [
-                players.get(2).get_last_x_poses(1).xyn[0][16][0] * frame_width,
-                players.get(2).get_last_x_poses(1).xyn[0][16][1] * frame_height,
-            ]
-        )
-        
-        # print(f'lastplayer1pos: {lastplayer1pos}')
-        lastplayer1distance = math.hypot(
-            lastplayer1pos[0][0] - lastplayer1pos[1][0],
-            lastplayer1pos[0][1] - lastplayer1pos[1][1],
-        )
-        lastplayer2distance = math.hypot(
-            lastplayer2pos[0][0] - lastplayer2pos[1][0],
-            lastplayer2pos[0][1] - lastplayer2pos[1][1],
-        )
-        # given that thge ankle position is the 16th and the 17th keypoint, we can check for lunges like so:
-        # if the player's ankle moves by more than 5 pixels in the last 5 frames, then the player has lunged
-        # if the player has lunged, then the match is in play
-
-        #pastballpos = [[x, y, frame_number], ...]
-        #go through the past threshold number of past ball positions and see if it was hit based on trajectory and angle patterns
-        
-        # Analyze ball trajectory for hit detection
-        if len(pastballpos) >= threshold:
-            recent_positions = pastballpos[-threshold:]
-            
-            # Calculate angles between consecutive segments
-            angles = []
-            velocities = []
-            
-            for i in range(len(recent_positions)-2):
-                p1 = recent_positions[i]
-                p2 = recent_positions[i+1] 
-                p3 = recent_positions[i+2]
-                
-                # Calculate vectors between consecutive points
-                v1 = [p2[0]-p1[0], p2[1]-p1[1]]
-                v2 = [p3[0]-p2[0], p3[1]-p2[1]]
-                
-                # Calculate angle between vectors
-                dot_product = v1[0]*v2[0] + v1[1]*v2[1]
-                mag1 = math.sqrt(v1[0]**2 + v1[1]**2)
-                mag2 = math.sqrt(v2[0]**2 + v2[1]**2)
-                
-                if mag1 > 0 and mag2 > 0:
-                    cos_angle = dot_product/(mag1*mag2)
-                    cos_angle = max(-1, min(1, cos_angle))
-                    angle = math.degrees(math.acos(cos_angle))
-                    angles.append(angle)
-                    
-                    # Calculate velocity between points
-                    time_diff = p2[2] - p1[2]
-                    if time_diff > 0:
-                        velocity = math.sqrt((p2[0]-p1[0])**2 + (p2[1]-p1[1])**2) / time_diff
-                        velocities.append(velocity)
-
-            # Check for sudden angle changes and velocity spikes
-            if angles and velocities:
-                max_angle_change = max(angles)
-                avg_velocity = sum(velocities)/len(velocities)
-                
-                if max_angle_change > ball_angle_thresh and avg_velocity > ball_velocity_thresh:
-                    ball_hit = True
-
-        if (
-            lastplayer1distance >= movement_threshold
-            or lastplayer2distance >= movement_threshold
-        ):
-            player_move = True
-        return [player_move, ball_hit]
-    except Exception:
-        print(f'got an exception in is_match_in_play')
-        return False
-def plot_coords(coords_list):
-    fig = plt.figure()
-    ax = fig.add_subplot(111, projection="3d")
-
-    for coords in coords_list:
-        x_coords, y_coords, z_coords = zip(*coords)
-        ax.scatter(x_coords, y_coords, z_coords)
-
-    ax.set_xlim(0, 6.4)
-    ax.set_ylim(0, 9.75)
-    ax.set_zlim(0, 4.57)
-
-    ax.set_xlabel("X axis")
-    ax.set_ylabel("Y axis")
-    ax.set_zlabel("Z axis")
-
-    plt.show()
 def create_court(court_width=400, court_height=610):
     # Create a blank image
     court = np.zeros((court_height, court_width, 3), np.uint8)
@@ -573,19 +211,17 @@ def load_data(file_path):
 
     return positions
 
-def main(path="main_laptop.mp4", frame_width=640, frame_height=360):
+def main(path="main_laptop.mp4", frame_width=640, frame_height=360, output_path="main_research"):
     try:
         print("imported all")
         csvstart = 0
         end = csvstart + 100
-
-
-        cleanwrite()
+        cleanwrite(home_path=output_path)
         pose_model = YOLO("models/yolo11n-pose.pt")
         ballmodel = YOLO("trained-models\\g-ball2(white_latest).pt")
         print("loaded models")
         cap = cv2.VideoCapture(path)
-        with open("output/final.txt", "w") as f:
+        with open(f"{output_path}/final.txt", "w") as f:
             f.write(
                 f"You are analyzing video: {path}.\nPlayer keypoints will be structured as such: 0: Nose 1: Left Eye 2: Right Eye 3: Left Ear 4: Right Ear 5: Left Shoulder 6: Right Shoulder 7: Left Elbow 8: Right Elbow 9: Left Wrist 10: Right Wrist 11: Left Hip 12: Right Hip 13: Left Knee 14: Right Knee 15: Left Ankle 16: Right Ankle.\nIf a keypoint is (0,0), then it has not beeen detected and should be deemed irrelevant. Here is how the output will be structured: \nFrame count\nPlayer 1 Keypoints\nPlayer 2 Keypoints\n Ball Position.\n\n"
             )
@@ -600,14 +236,12 @@ def main(path="main_laptop.mp4", frame_width=640, frame_height=360):
         ball_false_pos = []
         past_ball_pos = []
         logging.getLogger("ultralytics").setLevel(logging.ERROR)
-        output_path = "output/annotated.mp4"
-        weboutputpath = "websiteout/annotated.mp4"
+        video_out_path = output_path+"/annotated.mp4"
         fourcc = cv2.VideoWriter_fourcc(*"mp4v")
         fps = 30
-        importantoutputpath = "output/important.mp4"
-        cv2.VideoWriter(weboutputpath, fourcc, fps, (frame_width, frame_height))
+        importantoutputpath = output_path+"/important.mp4"
         cv2.VideoWriter(importantoutputpath, fourcc, fps, (frame_width, frame_height))
-        out = cv2.VideoWriter(output_path, fourcc, fps, (frame_width, frame_height))
+        out = cv2.VideoWriter(video_out_path, fourcc, fps, (frame_width, frame_height))
         detections = []
         plast=[[],[]]
         mainball = Ball(0, 0, 0, 0)
@@ -615,7 +249,7 @@ def main(path="main_laptop.mp4", frame_width=640, frame_height=360):
         otherTrackIds = [[0, 0], [1, 1], [2, 2]]
         updated = [[False, 0], [False, 0]]
         reference_points = []
-        reference_points = Referencepoints.get_reference_points(
+        reference_points = get_reference_points(
             path=path, frame_width=frame_width, frame_height=frame_height
         )
         is_rally=False
@@ -647,18 +281,17 @@ def main(path="main_laptop.mp4", frame_width=640, frame_height=360):
             [0, 9.75, 4.57],  # Left of the top line of the front court, 12
             [6.4, 9.75, 4.57],  # Right of the top line of the front court, 13
         ]
-        homography = generate_homography(
-            reference_points, reference_points_3d
-        )
+        
         court_view=create_court()
         #visualize_court()
         np.zeros((frame_height, frame_width), dtype=np.float32)
         np.zeros((frame_height, frame_width), dtype=np.float32)
-        heatmap_overlay_path = "output/white.png"
-        heatmap_image = cv2.imread(heatmap_overlay_path)
+        #create a white image that is frame_height x frame_width
+        npheatmap_image=np.zeros((frame_height, frame_width, 3), dtype=np.float32)
+        heatmap_image=create_court(court_width=400, court_height=610)    
         if heatmap_image is None:
             raise FileNotFoundError(
-                f"Could not find heatmap overlay image at {heatmap_overlay_path}"
+                f"Could not generate heatmap overlay "
             )
         np.zeros_like(heatmap_image, dtype=np.float32)
 
@@ -668,7 +301,6 @@ def main(path="main_laptop.mp4", frame_width=640, frame_height=360):
         print("started video input")
         int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
         abs(reference_points[1][0] - reference_points[0][0])
-        validate_reference_points(reference_points, reference_points_3d)
         print(f"loaded everything in {time.time()-start} seconds")
         while cap.isOpened():
             success, frame = cap.read()
@@ -1186,7 +818,7 @@ def main(path="main_laptop.mp4", frame_width=640, frame_height=360):
                         annotated_frame, (ball_pos[0], ball_pos[1]), 5, (0, 255, 0), -1
                     )
 
-            
+            #dump all data
             
             out.write(annotated_frame)
             cv2.imshow("Annotated Frame", annotated_frame)
