@@ -11,6 +11,7 @@ from ultralytics import YOLO
 from matplotlib import pyplot as plt
 from squash.Ball import Ball
 import sys
+import csv
 print(f"time to import everything: {time.time()-start}")
 alldata = organizeddata = []
 def get_reference_points(path, frame_width, frame_height):
@@ -819,7 +820,23 @@ def main(path="main_laptop.mp4", frame_width=640, frame_height=360, output_path=
                     )
 
             #dump all data
-            
+            def dump(path, player1kp, player2kp, ballpos):
+                data = [
+                    frame_count,
+                    player1kp,
+                    player2kp,
+                    ballpos,
+                ]
+                #write to a csv file
+                with open(path, 'a', newline='') as csvfile:
+                    writer = csv.writer(csvfile)
+                    writer.writerow(data)
+            try:
+                dump(f'{output_path}/final.csv', players.get(1).get_latest_pose().xyn, players.get(2).get_latest_pose().xyn, [ballx, bally])
+                print(f'ballxy was {plast[0]}')
+            except Exception as e:
+                print(f"error in dumping data: {e}")
+                pass
             out.write(annotated_frame)
             cv2.imshow("Annotated Frame", annotated_frame)
 
@@ -841,6 +858,8 @@ def main(path="main_laptop.mp4", frame_width=640, frame_height=360, output_path=
 if __name__ == "__main__":
     try:
         main()
+        print("finished first video")
+        main(path='temp.mp4', output_path='temp')
     # get keyboarinterrupt error
     except KeyboardInterrupt:
         print("keyboard interrupt")
