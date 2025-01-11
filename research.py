@@ -297,11 +297,14 @@ def main(path="main_laptop.mp4", frame_width=640, frame_height=360, output_path=
         np.zeros_like(heatmap_image, dtype=np.float32)
 
         ballxy = []
-
+        with open(f'{output_path}/reference_points.csv', 'w', newline='') as file:
+            writer=csv.writer(file)
+            writer.writerow(reference_points)
+            writer.writerow(reference_points_3d)
+        print("saved reference points")
+        
         running_frame = 0
         print("started video input")
-        int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-        abs(reference_points[1][0] - reference_points[0][0])
         print(f"loaded everything in {time.time()-start} seconds")
         while cap.isOpened():
             success, frame = cap.read()
