@@ -251,3 +251,77 @@ def visualize_3d_animation(reference_points_3d, player1_positions, player2_posit
     plt.show()
 
     return anim
+def read_all_data(csv_path="final.csv"):
+    """
+    Read all data from the CSV file and return as a list of dictionaries
+    """
+    data = []
+    with open(csv_path, "r") as csvfile:
+        csvreader = csv.DictReader(csvfile)
+        for row in csvreader:
+            processed_row = {key: ast.literal_eval(value.strip()) if key not in ["Frame count", "Shot Type", "Who Hit the Ball"] else value.strip() for key, value in row.items()}
+            data.append(processed_row)
+    return data
+def getFramesData(path="final.csv"):
+    """
+    Retrieves frame data from the CSV file and returns structured arrays for each component.
+    """
+    import csv
+    import numpy as np
+    
+    # Initialize data structures
+    data = {
+        'frame_counts': [],
+        'player1_keypoints': [],
+        'player2_keypoints': [],
+        'ball_positions': [], 
+        'shot_types': [],
+        'player1_world': [],
+        'player2_world': [],
+        'ball_world': [],
+        'hit_by': []
+    }
+    
+    def parse_array_string(s):
+        # Remove newlines and extra spaces
+        s = s.replace('\n', '').strip()
+        # Convert string to list of numbers
+        try:
+            # Extract numbers from string
+            numbers = [float(x) for x in s.replace('[','').replace(']','').split() if x.replace('.','').isdigit()]
+            # Reshape into correct format (17 keypoints, 2 coordinates)
+            return np.array(numbers).reshape(-1, 2)
+        except:
+            return np.zeros((17, 2))  # Return zero array if parsing fails
+    
+    # Read CSV file
+    with open(path, 'r') as csvfile:
+        csvreader = csv.DictReader(csvfile)
+        for row in csvreader:
+            # Parse numeric data
+            data['frame_counts'].append(int(row['Frame count']))
+            data['player1_keypoints'].append(parse_array_string(row['Player 1 Keypoints']))
+            data['player2_keypoints'].append(parse_array_string(row['Player 2 Keypoints']))
+            
+            # Parse ball position - expects format "[x, y]"
+            ball_pos_str = row['Ball Position'].replace('[','').replace(']','').split(',')
+            data['ball_positions'].append([float(x) for x in ball_pos_str])
+            
+            # Store strings directly
+            data['shot_types'].append(row['Shot Type'].strip())
+            
+            # Parse world positions
+            data['player1_world'].append([float(x) for x in row['Player 1 RL World Position'].replace('[','').replace(']','').split(',')])
+            data['player2_world'].append([float(x) for x in row['Player 2 RL World Position'].replace('[','').replace(']','').split(',')])
+            data['ball_world'].append([float(x) for x in row['Ball RL World Position'].replace('[','').replace(']','').split(',')])
+            data['hit_by'].append(row['Who Hit the Ball'].strip())
+
+    # Convert lists to numpy arrays
+    data['player1_keypoints'] = np.array(data['player1_keypoints'])
+    data['player2_keypoints'] = np.array(data['player2_keypoints'])
+    data['ball_positions'] = np.array(data['ball_positions'])
+    data['player1_world'] = np.array(data['player1_world'])
+    data['player2_world'] = np.array(data['player2_world']) 
+    data['ball_world'] = np.array(data['ball_world'])
+
+    return data
