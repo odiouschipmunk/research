@@ -860,9 +860,7 @@ def main(path="main_laptop.mp4", frame_width=640, frame_height=360, output_path=
 
 if __name__ == "__main__":
     try:
-        main()
-        print("finished first video")
-        main(path='temp.mp4', output_path='temp')
+        main(path="C:/Users/default.DESKTOP-7FKFEEG/Downloads/Farag v Coll 2019 (from squashtv).mp4", output_path='farag v coll 2019 squashtv out')
     # get keyboarinterrupt error
     except KeyboardInterrupt:
         print("keyboard interrupt")
