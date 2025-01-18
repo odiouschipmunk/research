@@ -251,3 +251,87 @@ def visualize_3d_animation(reference_points_3d, player1_positions, player2_posit
     plt.show()
 
     return anim
+def read_all_data(csv_path="final.csv"):
+    """
+    Read all data from the CSV file and return as a list of dictionaries
+    """
+    data = []
+    with open(csv_path, "r") as csvfile:
+        csvreader = csv.DictReader(csvfile)
+        for row in csvreader:
+            processed_row = {key: ast.literal_eval(value.strip()) if key not in ["Frame count", "Shot Type", "Who Hit the Ball"] else value.strip() for key, value in row.items()}
+            data.append(processed_row)
+    return data
+import os
+def getFramesData(path="final.csv"):
+    """
+    Retrieves frame data from the CSV file and returns structured arrays for each component.
+    """
+    
+    
+    # Initialize data structures
+    data = {
+        'frame_counts': [],
+        'player1_keypoints': [],
+        'player2_keypoints': [],
+        'ball_positions': [], 
+        'shot_types': [],
+        'player1_world': [],
+        'player2_world': [],
+        'ball_world': [],
+        'hit_by': []
+    }
+    
+    def parse_array_string(s):
+        if not s:  # Handle empty or None values
+            return np.zeros((17, 2))
+        # Remove newlines and extra spaces
+        s = s.replace('\n', '').strip()
+        try:
+            # Extract numbers from string
+            numbers = [float(x) for x in s.replace('[','').replace(']','').split() if x.replace('.','').isdigit()]
+            # Reshape into correct format (17 keypoints, 2 coordinates)
+            return np.array(numbers).reshape(-1, 2)
+        except:
+            return np.zeros((17, 2))
+    
+    def safe_float_list(s, default=[0, 0]):
+        if not s:  # Handle empty or None values
+            return default
+        try:
+            return [float(x) for x in s.replace('[','').replace(']','').split(',')]
+        except:
+            return default
+    
+    # Ensure path exists
+    if not os.path.exists(path):
+        raise FileNotFoundError(f"CSV file not found at: {path}")
+    
+    # Read CSV file
+    with open(path, 'r') as csvfile:
+        csvreader = csv.DictReader(csvfile)
+        for row in csvreader:
+            try:
+                # Parse numeric data with defaults for missing values
+                data['frame_counts'].append(int(row.get('Frame count', 0)))
+                data['player1_keypoints'].append(parse_array_string(row.get('Player 1 Keypoints')))
+                data['player2_keypoints'].append(parse_array_string(row.get('Player 2 Keypoints')))
+                data['ball_positions'].append(safe_float_list(row.get('Ball Position')))
+                data['shot_types'].append(row.get('Shot Type', '').strip())
+                data['player1_world'].append(safe_float_list(row.get('Player 1 RL World Position')))
+                data['player2_world'].append(safe_float_list(row.get('Player 2 RL World Position')))
+                data['ball_world'].append(safe_float_list(row.get('Ball RL World Position')))
+                data['hit_by'].append(row.get('Who Hit the Ball', '').strip())
+            except Exception as e:
+                print(f"Error processing row: {e}")
+                continue
+
+    # Convert lists to numpy arrays
+    data['player1_keypoints'] = np.array(data['player1_keypoints'])
+    data['player2_keypoints'] = np.array(data['player2_keypoints'])
+    data['ball_positions'] = np.array(data['ball_positions'])
+    data['player1_world'] = np.array(data['player1_world'])
+    data['player2_world'] = np.array(data['player2_world']) 
+    data['ball_world'] = np.array(data['ball_world'])
+
+    return data
