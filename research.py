@@ -448,7 +448,7 @@ def main(path="main_laptop.mp4", frame_width=640, frame_height=360, output_path=
                             last_pos_p2 = player_last_positions.get(2, (None, None))
                             # print(f"last pos p1: {last_pos_p1}")
                             occluded = []
-                            try:
+                            try: 
                                 occluded.append(
                                     [
                                         len(track_ids),
