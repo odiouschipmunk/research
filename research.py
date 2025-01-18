@@ -14,6 +14,7 @@ import sys
 import csv
 print(f"time to import everything: {time.time()-start}")
 alldata = organizeddata = []
+reference_points=[]
 def get_reference_points(path, frame_width, frame_height):
     # Mouse callback function to capture click events
     def click_event(event, x, y, flags, params):
@@ -63,7 +64,7 @@ def get_reference_points(path, frame_width, frame_height):
         print(
             "Click on the key points of the court. Press 's' to save and 'q' to quit.\nMake sure to click in the following order shown by the example"
         )
-        example_image = cv2.imread("output/annotated-squash-court.png")
+        example_image = cv2.imread("annotated-squash-court.png")
         example_image_resized = cv2.resize(example_image, (frame_width, frame_height))
         cv2.imshow("Court Example", example_image_resized)
         while True:
@@ -95,7 +96,7 @@ def cleanwrite(home_path):
     #if not os.path.exists(home_path), then create the file
     if not os.path.exists(home_path):
         os.makedirs(home_path, exist_ok=True)
-    
+
     with open(f"{home_path}/ball.txt", "w") as f:
         f.write("")
     with open(f"{home_path}/player1.txt", "w") as f:
@@ -212,7 +213,7 @@ def load_data(file_path):
 
     return positions
 
-def main(path="main_laptop.mp4", frame_width=640, frame_height=360, output_path="main_research"):
+def main(path="C:\\Users\\default.DESKTOP-7FKFEEG\\Downloads\\farag v elshorbagy 2019 chopped.mp4", frame_width=640, frame_height=480, output_path="farag v elshorbagy 2019 squashtv out"):
     try:
         print("imported all")
         csvstart = 0
@@ -282,14 +283,14 @@ def main(path="main_laptop.mp4", frame_width=640, frame_height=360, output_path=
             [0, 9.75, 4.57],  # Left of the top line of the front court, 12
             [6.4, 9.75, 4.57],  # Right of the top line of the front court, 13
         ]
-        
+
         court_view=create_court()
         #visualize_court()
         np.zeros((frame_height, frame_width), dtype=np.float32)
         np.zeros((frame_height, frame_width), dtype=np.float32)
         #create a white image that is frame_height x frame_width
         npheatmap_image=np.zeros((frame_height, frame_width, 3), dtype=np.float32)
-        heatmap_image=create_court(court_width=400, court_height=610)    
+        heatmap_image=create_court(court_width=400, court_height=610)
         if heatmap_image is None:
             raise FileNotFoundError(
                 f"Could not generate heatmap overlay "
@@ -302,7 +303,7 @@ def main(path="main_laptop.mp4", frame_width=640, frame_height=360, output_path=
             writer.writerow(reference_points)
             writer.writerow(reference_points_3d)
         print("saved reference points")
-        
+
         running_frame = 0
         print("started video input")
         print(f"loaded everything in {time.time()-start} seconds")
@@ -321,10 +322,10 @@ def main(path="main_laptop.mp4", frame_width=640, frame_height=360, output_path=
                 sum(references2) / len(references2)
 
             running_frame += 1
-            
+
             ball = ballmodel(frame)
 
-            annotated_frame = frame.copy() 
+            annotated_frame = frame.copy()
 
             for reference in reference_points:
                 cv2.circle(
@@ -422,7 +423,7 @@ def main(path="main_laptop.mp4", frame_width=640, frame_height=360, output_path=
                             mainball.getlastpos()[1],
                             ballmap,
                         )
-            
+
                 """
                 FRAMEPOSE
                 """
@@ -448,8 +449,8 @@ def main(path="main_laptop.mp4", frame_width=640, frame_height=360, output_path=
                             last_pos_p2 = player_last_positions.get(2, (None, None))
                             # print(f"last pos p1: {last_pos_p1}")
                             occluded = []
-                            try: 
-                                occluded.append( 
+                            try:
+                                occluded.append(
                                     [
                                         len(track_ids),
                                         last_pos_p1,
@@ -460,7 +461,7 @@ def main(path="main_laptop.mp4", frame_width=640, frame_height=360, output_path=
                             except Exception:
                                 pass
                         if len(track_ids) > 2:
-                            print(f"track ids were greater than 2: {track_ids}")
+                            #print(f"track ids were greater than 2: {track_ids}")
                             continue
 
                         for box, track_id, kp in zip(boxes, track_ids, keypoints):
@@ -480,7 +481,7 @@ def main(path="main_laptop.mp4", frame_width=640, frame_height=360, output_path=
                                     print(f"added track id {track_id} to player 1")
                             # if updated[0], then that means that player 1 was updated last
                             # bc of this, we can assume that the next player is player 2
-                            
+
                             if track_id == 1:
                                 playerid = 1
                             elif track_id == 2:
@@ -581,7 +582,7 @@ def main(path="main_laptop.mp4", frame_width=640, frame_height=360, output_path=
                             else:
                                 #print(f'kp: {kp}')
                                 print(f"could not find the player position for player {playerid}")
-                        
+
                         # in the form of [ball shot type, player1 proximity to the ball, player2 proximity to the ball, ]
                         importantdata = []
                 except Exception as e:
@@ -834,11 +835,45 @@ def main(path="main_laptop.mp4", frame_width=640, frame_height=360, output_path=
                 with open(path, 'a', newline='') as csvfile:
                     writer = csv.writer(csvfile)
                     writer.writerow(data)
+                    import json
+                    import os
+
+            def dump_json(path, player1kp, player2kp, ballpos):
+                data = {
+                    "frame_count": frame_count,
+                    "player1_keypoints": player1kp,
+                    "player2_keypoints": player2kp,
+                    "ball_position": ballpos,
+                }
+
+                # Initialize file if it doesn't exist
+                if not os.path.exists(path):
+                    with open(path, 'w') as jsonfile:
+                        jsonfile.write('[\n]')
+
+                file_size = os.path.getsize(path)
+
+                if file_size <= 2:  # File is empty or just contains []
+                    with open(path, 'w') as jsonfile:
+                        jsonfile.write('[\n')
+                        json.dump(data, jsonfile, indent=2)
+                        jsonfile.write('\n]')
+                else:
+                    with open(path, 'r+') as jsonfile:
+                        jsonfile.seek(file_size - 2)  # Move before the closing bracket
+                        jsonfile.write(',\n')
+                        json.dump(data, jsonfile, indent=2)
+                        jsonfile.write('\n]')
+
             try:
-                dump(f'{output_path}/final.csv', players.get(1).get_latest_pose().xyn, players.get(2).get_latest_pose().xyn, [ballx, bally])
-                print(f'ballxy was {plast[0]}')
+                dump_json(
+                    f'{output_path}/final.json',
+                    players.get(1).get_latest_pose().xyn.tolist(),
+                    players.get(2).get_latest_pose().xyn.tolist(),
+                    mainball.getloc()
+                )
             except Exception as e:
-                print(f"error in dumping data: {e}")
+                print(f"Error writing JSON: {e}")
                 pass
             out.write(annotated_frame)
             cv2.imshow("Annotated Frame", annotated_frame)
@@ -860,7 +895,12 @@ def main(path="main_laptop.mp4", frame_width=640, frame_height=360, output_path=
 
 if __name__ == "__main__":
     try:
-        main(path="C:/Users/default.DESKTOP-7FKFEEG/Downloads/Farag v Coll 2019 (from squashtv).mp4", output_path='farag v coll 2019 squashtv out')
+        path="C:\\Users\\default.DESKTOP-7FKFEEG\\Downloads\\farag v elshorbagy 2019 chopped.mp4"
+        cap=cv2.VideoCapture(path)
+        total_frames= int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        print(f'total number of frames: {total_frames}')
+        cap.release()#
+        main(path="C:\\Users\\default.DESKTOP-7FKFEEG\\Downloads\\farag v elshorbagy 2019 chopped.mp4", frame_height=1080, frame_width=1920, output_path="farag v elshorbagy 2019 squashtv out")
     # get keyboarinterrupt error
     except KeyboardInterrupt:
         print("keyboard interrupt")
@@ -869,6 +909,3 @@ if __name__ == "__main__":
     except Exception:
         # print(f"error: {e}")
         pass
-
-
-
