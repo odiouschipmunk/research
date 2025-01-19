@@ -1,4 +1,5 @@
 .venv
+output frames fvel
 main.mp4
 venv
 roboflowmodels
