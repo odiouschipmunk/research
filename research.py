@@ -11,7 +11,6 @@ from ultralytics import YOLO
 from matplotlib import pyplot as plt
 from squash.Ball import Ball
 import sys
-
 print(f"time to import everything: {time.time()-start}")
 alldata = organizeddata = []
 reference_points=[]
@@ -900,7 +899,7 @@ if __name__ == "__main__":
         total_frames= int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
         print(f'total number of frames: {total_frames}')
         cap.release()#
-        main(path="C:\\Users\\default.DESKTOP-7FKFEEG\\Downloads\\farag v elshorbagy 2019 chopped.mp4", frame_height=1080, frame_width=1920, output_path="farag v elshorbagy 2019 squashtv out")
+        main(path="C:\\Users\\default.DESKTOP-7FKFEEG\\Downloads\\farag v elshorbagy 2019 chopped.mp4", frame_height=480, frame_width=640, output_path="farag v elshorbagy 2019 squashtv out")
     # get keyboarinterrupt error
     except KeyboardInterrupt:
         print("keyboard interrupt")

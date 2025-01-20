@@ -3,6 +3,8 @@ farag_v_elshorbagy_frames
 farag_v_elshorbagy_frames_small
 output_frames
 output frames fvel
+temp_output_frames_dump
+*.mp4
 main.mp4
 venv
 roboflowmodels
