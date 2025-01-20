@@ -2,7 +2,7 @@ from re import I
 import time
 start = time.time()
 import cv2
-import json, os, csv, math, logging
+import json, os, csv, logging
 import logging
 import math
 import numpy as np
@@ -11,7 +11,7 @@ from ultralytics import YOLO
 from matplotlib import pyplot as plt
 from squash.Ball import Ball
 import sys
-import csv
+
 print(f"time to import everything: {time.time()-start}")
 alldata = organizeddata = []
 reference_points=[]
