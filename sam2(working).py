@@ -15,11 +15,18 @@ def initialize_sam2():
     predictor = build_sam2_video_predictor(model_cfg, sam2_checkpoint, device=device)
     return predictor
 
+import natsort  # Ensure natsort is installed
+
 def get_frame_paths(folder_path):
-    """Get sorted list of frame paths."""
+    """Get sorted list of frame paths with error handling."""
+    if not os.path.exists(folder_path):
+        raise FileNotFoundError(f"Folder {folder_path} does not exist")
+
     frame_files = [f for f in os.listdir(folder_path) if f.endswith(('.jpg', '.png'))]
-    frame_files.sort(key=lambda x: int(''.join(filter(str.isdigit, x))))
-    return [os.path.join(folder_path, f) for f in frame_files]
+    if not frame_files:
+        raise ValueError(f"No images found in {folder_path}")
+
+    return natsort.natsorted([os.path.join(folder_path, f) for f in frame_files])
 
 def show_mask(mask, ax, random_color=False):
     """Visualize the mask."""
