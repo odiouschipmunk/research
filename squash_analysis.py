@@ -154,7 +154,7 @@ def visualize_shot_trajectories(df):
             continue
 
         cache_path = os.path.join(
-            CACHE_DIR, f'3d_trajectory_{shot_type.lower().replace(" ", "_")}.png'
+            CACHE_DIR, f"3d_trajectory_{shot_type.lower().replace(' ', '_')}.png"
         )
 
         # If cached visualization exists, skip
@@ -203,7 +203,7 @@ def visualize_shot_trajectories(df):
 def create_3d_heatmap(df, player_column, title):
     """Create 3D heatmap of player positions"""
     cache_path = os.path.join(
-        CACHE_DIR, f'3d_heatmap_{title.lower().replace(" ", "_")}.png'
+        CACHE_DIR, f"3d_heatmap_{title.lower().replace(' ', '_')}.png"
     )
 
     # If cached visualization exists, return early
@@ -259,7 +259,7 @@ def analyze_shot_distribution(df):
 def create_court_heatmap(df, player_column, title):
     """Create 2D heatmap of player positions on court"""
     cache_path = os.path.join(
-        CACHE_DIR, f'{title.lower().replace(" ", "_")}_heatmap.png'
+        CACHE_DIR, f"{title.lower().replace(' ', '_')}_heatmap.png"
     )
 
     # If cached visualization exists, return early
@@ -400,7 +400,9 @@ def generate_match_report(csv_path):
     report += "1. Shot Distribution\n"
     report += "-------------------\n"
     for shot, count in shot_dist.items():
-        report += f"{shot}: {count} shots ({count/sum(shot_dist.values())*100:.1f}%)\n"
+        report += (
+            f"{shot}: {count} shots ({count / sum(shot_dist.values()) * 100:.1f}%)\n"
+        )
 
     report += "\n2. Shot Success Rates\n"
     report += "-------------------\n"

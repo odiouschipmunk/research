@@ -10,25 +10,28 @@ from sam2.build_sam import build_sam2_video_predictor
 from datetime import datetime
 import gc
 import matplotlib.pyplot as plt
+
 os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
 FRAME_SKIP = 5
 BATCH_SIZE = 8
 DOWNSCALE_FACTOR = 0.5
 USE_FP16 = True
+
+
 def rename_frames_numeric(frame_dir):
     """Remove prefixes from frame filenames"""
     for f in os.listdir(frame_dir):
-        if '_' in f:  # Remove any prefixes before numbers
-            new_name = f.split('_')[-1]
-            os.rename(
-                os.path.join(frame_dir, f),
-                os.path.join(frame_dir, new_name)
-            )
+        if "_" in f:  # Remove any prefixes before numbers
+            new_name = f.split("_")[-1]
+            os.rename(os.path.join(frame_dir, f), os.path.join(frame_dir, new_name))
+
 
 def natural_sort_key(s):
     """Natural sorting for numeric filenames"""
-    return [int(text) if text.isdigit() else text.lower()
-            for text in re.split('(\d+)', s)]
+    return [
+        int(text) if text.isdigit() else text.lower() for text in re.split("(\d+)", s)
+    ]
+
 
 class SquashBallTracker:
     def __init__(self):
@@ -42,17 +45,19 @@ class SquashBallTracker:
         sam2_checkpoint = "trained-models/sam2.1_hiera_large.pt"
         model_cfg = "configs/sam2.1/sam2.1_hiera_l.yaml"
         predictor = build_sam2_video_predictor(
-            model_cfg,
-            sam2_checkpoint,
-            device=self.device,
-            half_precision=True
+            model_cfg, sam2_checkpoint, device=self.device, half_precision=True
         )
         return predictor
+
     def process_video_chunk(self, chunk_path, initial_point=None):
-        frame_paths = sorted([os.path.join(chunk_path, f)
-                            for f in os.listdir(chunk_path)
-                            if f.endswith(('.jpg', '.png'))],
-                            key=lambda x: natural_sort_key(x))
+        frame_paths = sorted(
+            [
+                os.path.join(chunk_path, f)
+                for f in os.listdir(chunk_path)
+                if f.endswith((".jpg", ".png"))
+            ],
+            key=lambda x: natural_sort_key(x),
+        )
 
         if not frame_paths:
             return []
@@ -70,9 +75,9 @@ class SquashBallTracker:
                 continue
 
             frame = cv2.imread(frame_path)
-            small_frame = cv2.resize(frame, (0,0),
-                                    fx=DOWNSCALE_FACTOR,
-                                    fy=DOWNSCALE_FACTOR)
+            small_frame = cv2.resize(
+                frame, (0, 0), fx=DOWNSCALE_FACTOR, fy=DOWNSCALE_FACTOR
+            )
 
             _, out_obj_ids, out_mask_logits = self.predictor.add_new_points_or_box(
                 inference_state=inference_state,
@@ -89,14 +94,16 @@ class SquashBallTracker:
                     x_center = int(np.mean(x) / DOWNSCALE_FACTOR)
                     y_center = int(np.mean(y) / DOWNSCALE_FACTOR)
 
-                    chunk_positions.append({
-                        "chunk": self.current_chunk,
-                        "frame": idx,
-                        "timestamp": idx/30,
-                        "x": x_center,
-                        "y": y_center,
-                        "confidence": float(out_mask_logits[0].mean().item())
-                    })
+                    chunk_positions.append(
+                        {
+                            "chunk": self.current_chunk,
+                            "frame": idx,
+                            "timestamp": idx / 30,
+                            "x": x_center,
+                            "y": y_center,
+                            "confidence": float(out_mask_logits[0].mean().item()),
+                        }
+                    )
 
             # Clear memory every few frames
             if idx % BATCH_SIZE == 0:
@@ -110,6 +117,7 @@ class SquashBallTracker:
 
         self.current_chunk += 1
         return chunk_positions
+
     def get_initial_point(self, frame):
         frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
         plt.figure(figsize=(12, 8))
@@ -119,15 +127,16 @@ class SquashBallTracker:
         plt.close()
         return np.array(point, dtype=np.float32)
 
-    def save_results(self, format='csv'):
-        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-        if format == 'csv':
+    def save_results(self, format="csv"):
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        if format == "csv":
             df = pd.DataFrame(self.ball_positions)
             df.to_csv(f"ball_positions_{timestamp}.csv", index=False)
-        elif format == 'json':
-            with open(f"ball_positions_{timestamp}.json", 'w') as f:
+        elif format == "json":
+            with open(f"ball_positions_{timestamp}.json", "w") as f:
                 json.dump(self.ball_positions, f, indent=2)
         print(f"Results saved in {format.upper()} format")
+
 
 def process_long_video(video_path, chunk_length=120):
     tracker = SquashBallTracker()
@@ -139,14 +148,16 @@ def process_long_video(video_path, chunk_length=120):
             f'ffmpeg -i "{safe_video_path}" -c copy -f segment -segment_time {chunk_length} '
             f'-reset_timestamps 1 "video_chunks/chunk_%03d.mp4"',
             shell=True,
-            check=True
+            check=True,
         )
     except subprocess.CalledProcessError as e:
         print(f"FFmpeg error: {e}")
         return
 
-    chunks = sorted([f for f in os.listdir("video_chunks") if f.endswith('.mp4')],
-                   key=natural_sort_key)
+    chunks = sorted(
+        [f for f in os.listdir("video_chunks") if f.endswith(".mp4")],
+        key=natural_sort_key,
+    )
 
     initial_point = None
     for chunk in chunks:
@@ -159,7 +170,7 @@ def process_long_video(video_path, chunk_length=120):
             subprocess.run(
                 f'ffmpeg -i "{chunk_path}" "{frame_dir}/%05d.jpg"',
                 shell=True,
-                check=True
+                check=True,
             )
             # Rename if any prefixes exist
             rename_frames_numeric(frame_dir)
@@ -178,13 +189,14 @@ def process_long_video(video_path, chunk_length=120):
         os.remove(chunk_path)
 
         if positions:
-            initial_point = np.array([positions[-1]['x'], positions[-1]['y']])
+            initial_point = np.array([positions[-1]["x"], positions[-1]["y"]])
 
-        tracker.save_results(format='csv')
+        tracker.save_results(format="csv")
 
     os.rmdir("video_chunks")
-    tracker.save_results(format='csv')
+    tracker.save_results(format="csv")
     return tracker.ball_positions
+
 
 if __name__ == "__main__":
     video_path = r"farag_elshorbagy_1m_chopped.mp4"

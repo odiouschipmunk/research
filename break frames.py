@@ -3,6 +3,7 @@ import os
 import numpy as np
 from time import time
 
+
 def extract_frames_gpu(video_path, output_dir, max_frames=20000):
     # Create output directory if it doesn't exist
     if not os.path.exists(output_dir):
@@ -60,11 +61,15 @@ def extract_frames_gpu(video_path, output_dir, max_frames=20000):
                 processed_frame = gpu_frame.download(stream)
 
                 # Save the frame
-                frame_filename = os.path.join(output_dir, f'frame_{saved_count:05d}.jpg')
+                frame_filename = os.path.join(
+                    output_dir, f"frame_{saved_count:05d}.jpg"
+                )
                 cv2.imwrite(frame_filename, processed_frame)
             else:
                 # CPU processing path
-                frame_filename = os.path.join(output_dir, f'frame_{saved_count:05d}.jpg')
+                frame_filename = os.path.join(
+                    output_dir, f"frame_{saved_count:05d}.jpg"
+                )
                 cv2.imwrite(frame_filename, frame)
 
             saved_count += 1
@@ -86,11 +91,14 @@ def extract_frames_gpu(video_path, output_dir, max_frames=20000):
     total_time = time() - start_time
     print(f"\nExtraction complete! Saved {saved_count} frames to {output_dir}")
     print(f"Total time: {total_time:.2f} seconds")
-    print(f"Average speed: {saved_count/total_time:.2f} frames/second")
+    print(f"Average speed: {saved_count / total_time:.2f} frames/second")
+
 
 # Example usage
 if __name__ == "__main__":
     video_path = "C:/Users/default.DESKTOP-7FKFEEG/Downloads/farag v elshorbagy 2019 chopped.mp4"  # Replace with your video path
-    output_directory = "output frames fvel"  # Replace with your desired output directory
+    output_directory = (
+        "output frames fvel"  # Replace with your desired output directory
+    )
 
     extract_frames_gpu(video_path, output_directory)

@@ -11,10 +11,11 @@ from datetime import datetime
 import json
 import shutil
 
+
 def initialize_sam2():
     """Initialize the SAM2 model with optimizations."""
-    sam2_checkpoint = "trained-models/sam2.1_hiera_large.pt"
-    model_cfg = "configs/sam2.1/sam2.1_hiera_l.yaml"
+    sam2_checkpoint = "trained-models/sam2.1_hiera_tiny.pt"
+    model_cfg = "configs/sam2.1/sam2.1_hiera_t.yaml"
     device = "cuda" if torch.cuda.is_available() else "cpu"
 
     if device == "cuda":
@@ -25,7 +26,8 @@ def initialize_sam2():
     predictor = build_sam2_video_predictor(model_cfg, sam2_checkpoint, device=device)
     return predictor
 
-def extract_frames_efficiently(video_path, temp_folder='temp_frames'):
+
+def extract_frames_efficiently(video_path, temp_folder="temp_frames"):
     """Extract frames more efficiently using threading."""
     if not os.path.exists(temp_folder):
         os.makedirs(temp_folder)
@@ -40,7 +42,7 @@ def extract_frames_efficiently(video_path, temp_folder='temp_frames'):
     def save_frame(args):
         frame, index = args
         if frame is not None:
-            frame_path = os.path.join(temp_folder, f'{index+1}.jpg')
+            frame_path = os.path.join(temp_folder, f"{index + 1}.jpg")
             cv2.imwrite(frame_path, frame, [cv2.IMWRITE_JPEG_QUALITY, 95])
             return frame_path
         return None
@@ -59,17 +61,18 @@ def extract_frames_efficiently(video_path, temp_folder='temp_frames'):
             with ThreadPoolExecutor(max_workers=4) as executor:
                 saved_paths = list(executor.map(save_frame, frames_to_save))
                 for i, path in enumerate(saved_paths):
-                    frame_paths[len(frame_paths)-len(frames_to_save)+i] = path
+                    frame_paths[len(frame_paths) - len(frames_to_save) + i] = path
             frames_to_save = []
 
     if frames_to_save:
         with ThreadPoolExecutor(max_workers=4) as executor:
             saved_paths = list(executor.map(save_frame, frames_to_save))
             for i, path in enumerate(saved_paths):
-                frame_paths[len(frame_paths)-len(frames_to_save)+i] = path
+                frame_paths[len(frame_paths) - len(frames_to_save) + i] = path
 
     cap.release()
     return [p for p in frame_paths if p is not None], fps
+
 
 def create_output_directory(input_path):
     """Create an organized output directory structure."""
@@ -84,6 +87,7 @@ def create_output_directory(input_path):
 
     return output_dir
 
+
 def track_squash_ball(input_path):
     try:
         # Create output directory
@@ -97,10 +101,10 @@ def track_squash_ball(input_path):
         processing_info = {
             "input_file": input_path,
             "processing_date": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-            "cuda_available": torch.cuda.is_available()
+            "cuda_available": torch.cuda.is_available(),
         }
 
-        is_video = input_path.lower().endswith(('.mp4', '.avi', '.mov'))
+        is_video = input_path.lower().endswith((".mp4", ".avi", ".mov"))
 
         if is_video:
             print("Processing video file...")
@@ -110,10 +114,13 @@ def track_squash_ball(input_path):
         else:
             print("Processing folder of frames...")
             folder_path = input_path
-            frame_paths = natsort.natsorted([
-                os.path.join(folder_path, f) for f in os.listdir(folder_path)
-                if f.endswith(('.jpg', '.png'))
-            ])
+            frame_paths = natsort.natsorted(
+                [
+                    os.path.join(folder_path, f)
+                    for f in os.listdir(folder_path)
+                    if f.endswith((".jpg", ".png"))
+                ]
+            )
             fps = 30.0
             processing_info["fps"] = fps
 
@@ -125,9 +132,13 @@ def track_squash_ball(input_path):
         window_name = "Click on the squash ball"
         cv2.namedWindow(window_name)
         point = []
-        cv2.setMouseCallback(window_name, lambda event, x, y, flags, param:
-            point.append((x, y)) or cv2.destroyWindow(window_name)
-            if event == cv2.EVENT_LBUTTONDOWN else None)
+        cv2.setMouseCallback(
+            window_name,
+            lambda event, x, y, flags, param: point.append((x, y))
+            or cv2.destroyWindow(window_name)
+            if event == cv2.EVENT_LBUTTONDOWN
+            else None,
+        )
         cv2.imshow(window_name, first_frame)
         cv2.waitKey(0)
 
@@ -152,8 +163,15 @@ def track_squash_ball(input_path):
 
         video_segments = {}
         with torch.cuda.amp.autocast():
-            for out_frame_idx, out_obj_ids, out_mask_logits in predictor.propagate_in_video(inference_state):
-                masks = [(out_mask_logits[i] > 0.0).cpu().numpy() for i in range(len(out_obj_ids))]
+            for (
+                out_frame_idx,
+                out_obj_ids,
+                out_mask_logits,
+            ) in predictor.propagate_in_video(inference_state):
+                masks = [
+                    (out_mask_logits[i] > 0.0).cpu().numpy()
+                    for i in range(len(out_obj_ids))
+                ]
                 if masks:
                     video_segments[out_frame_idx] = {
                         out_obj_id: mask for out_obj_id, mask in zip(out_obj_ids, masks)
@@ -166,8 +184,9 @@ def track_squash_ball(input_path):
 
         height, width = first_frame.shape[:2]
         output_video_path = os.path.join(output_dir, "video", "ball_tracking.mp4")
-        out = cv2.VideoWriter(output_video_path,
-                            cv2.VideoWriter_fourcc(*'mp4v'), fps, (width, height))
+        out = cv2.VideoWriter(
+            output_video_path, cv2.VideoWriter_fourcc(*"mp4v"), fps, (width, height)
+        )
 
         ball_positions = []
         ball_data = []  # For CSV export
@@ -180,9 +199,11 @@ def track_squash_ball(input_path):
                     mask = mask[0]
 
                 if mask.shape != frame.shape[:2]:
-                    mask = cv2.resize(mask.astype(np.uint8),
-                                    (frame.shape[1], frame.shape[0]),
-                                    interpolation=cv2.INTER_NEAREST)
+                    mask = cv2.resize(
+                        mask.astype(np.uint8),
+                        (frame.shape[1], frame.shape[0]),
+                        interpolation=cv2.INTER_NEAREST,
+                    )
 
                 mask_overlay = np.zeros_like(frame)
                 mask_overlay[mask > 0] = [0, 0, 255]
@@ -196,22 +217,32 @@ def track_squash_ball(input_path):
                     ball_positions.append((frame_idx, center_x, center_y))
 
                     # Store additional data for CSV
-                    ball_data.append({
-                        'frame': frame_idx,
-                        'time': frame_idx/fps,
-                        'x': center_x,
-                        'y': center_y,
-                        'mask_area': len(y_coords)
-                    })
+                    ball_data.append(
+                        {
+                            "frame": frame_idx,
+                            "time": frame_idx / fps,
+                            "x": center_x,
+                            "y": center_y,
+                            "mask_area": len(y_coords),
+                        }
+                    )
 
             if len(ball_positions) > 1:
                 recent_positions = ball_positions[-10:]
-                points = np.array([(pos[1], pos[2]) for pos in recent_positions],
-                                dtype=np.int32)
+                points = np.array(
+                    [(pos[1], pos[2]) for pos in recent_positions], dtype=np.int32
+                )
                 cv2.polylines(frame, [points], False, (0, 255, 255), 2)
 
-            cv2.putText(frame, f"Frame: {frame_idx}", (10, 30),
-                       cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 255, 255), 2)
+            cv2.putText(
+                frame,
+                f"Frame: {frame_idx}",
+                (10, 30),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                1,
+                (255, 255, 255),
+                2,
+            )
             out.write(frame)
 
         out.release()
@@ -221,36 +252,38 @@ def track_squash_ball(input_path):
 
         # Save CSV
         csv_path = os.path.join(data_dir, "ball_tracking_data.csv")
-        with open(csv_path, 'w', newline='') as f:
-            writer = csv.DictWriter(f, fieldnames=['frame', 'time', 'x', 'y', 'mask_area'])
+        with open(csv_path, "w", newline="") as f:
+            writer = csv.DictWriter(
+                f, fieldnames=["frame", "time", "x", "y", "mask_area"]
+            )
             writer.writeheader()
             writer.writerows(ball_data)
 
         # Save processing info
         processing_info["total_frames"] = len(ball_data)
-        processing_info["tracking_duration"] = ball_data[-1]['time'] if ball_data else 0
+        processing_info["tracking_duration"] = ball_data[-1]["time"] if ball_data else 0
 
-        with open(os.path.join(data_dir, "processing_info.json"), 'w') as f:
+        with open(os.path.join(data_dir, "processing_info.json"), "w") as f:
             json.dump(processing_info, f, indent=4)
 
         # Save trajectory plot
         if ball_positions:
             plt.figure(figsize=(15, 5))
-            times = [d['time'] for d in ball_data]
-            x_pos = [d['x'] for d in ball_data]
-            y_pos = [d['y'] for d in ball_data]
+            times = [d["time"] for d in ball_data]
+            x_pos = [d["x"] for d in ball_data]
+            y_pos = [d["y"] for d in ball_data]
 
             plt.subplot(121)
             plt.plot(times, x_pos)
-            plt.title('Ball X Position over Time')
-            plt.xlabel('Time (seconds)')
-            plt.ylabel('X Position (pixels)')
+            plt.title("Ball X Position over Time")
+            plt.xlabel("Time (seconds)")
+            plt.ylabel("X Position (pixels)")
 
             plt.subplot(122)
             plt.plot(times, y_pos)
-            plt.title('Ball Y Position over Time')
-            plt.xlabel('Time (seconds)')
-            plt.ylabel('Y Position (pixels)')
+            plt.title("Ball Y Position over Time")
+            plt.xlabel("Time (seconds)")
+            plt.ylabel("Y Position (pixels)")
 
             plt.tight_layout()
             plt.savefig(os.path.join(data_dir, "trajectory_plot.png"))
@@ -263,12 +296,14 @@ def track_squash_ball(input_path):
     except Exception as e:
         print(f"An error occurred: {str(e)}")
         import traceback
+
         traceback.print_exc()
 
     finally:
-        if is_video and os.path.exists('temp_frames'):
-            shutil.rmtree('temp_frames')
+        if is_video and os.path.exists("temp_frames"):
+            shutil.rmtree("temp_frames")
+
 
 if __name__ == "__main__":
-    input_path = 'farag_v_elshorbagy_1m_chopped_v2.mp4'
+    input_path = "farag_v_elshorbagy_1m_chopped_v2.mp4"
     track_squash_ball(input_path)
