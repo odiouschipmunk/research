@@ -9,6 +9,7 @@ import numpy as np
 from squash.Player import Player
 from ultralytics import YOLO
 from matplotlib import pyplot as plt
+from squash.Ball import Ball
 import sys
 print(f"time to import everything: {time.time()-start}")
 alldata = organizeddata = []
@@ -91,22 +92,29 @@ def drawmap(lx, ly, rx, ry, map):
     map[ry, rx] += 1
 
 def cleanwrite(home_path):
+    #if not os.path.exists(home_path), then create the file
     if not os.path.exists(home_path):
         os.makedirs(home_path, exist_ok=True)
 
+    with open(f"{home_path}/ball.txt", "w") as f:
+        f.write("")
     with open(f"{home_path}/player1.txt", "w") as f:
         f.write("")
     with open(f"{home_path}/player2.txt", "w") as f:
+        f.write("")
+    with open(f"{home_path}/ball-xyn.txt", "w") as f:
+        f.write("")
+    with open(f"{home_path}/read_ball.txt", "w") as f:
         f.write("")
     with open(f"{home_path}/read_player1.txt", "w") as f:
         f.write("")
     with open(f"{home_path}/read_player2.txt", "w") as f:
         f.write("")
     with open(f"{home_path}/final.json", "w") as f:
-        json.dump([], f)  # Initialize with empty array
+        f.write("[")
     with open(f"{home_path}/final.csv", "w") as f:
         f.write(
-            "Frame count,Player 1 Keypoints,Player 2 Keypoints,Player 1 RL World Position,Player 2 RL World Position,\n"
+            "Frame count,Player 1 Keypoints,Player 2 Keypoints,Ball Position,Shot Type,Player 1 RL World Position,Player 2 RL World Position,Ball RL World Position,Who Hit the Ball\n"
         )
 
 
@@ -211,9 +219,13 @@ def main(path="C:\\Users\\default.DESKTOP-7FKFEEG\\Downloads\\farag v elshorbagy
         end = csvstart + 100
         cleanwrite(home_path=output_path)
         pose_model = YOLO("models/yolo11n-pose.pt")
+        ballmodel = YOLO("trained-models\\g-ball2(white_latest).pt")
         print("loaded models")
         cap = cv2.VideoCapture(path)
-
+        with open(f"{output_path}/final.txt", "w") as f:
+            f.write(
+                f"You are analyzing video: {path}.\nPlayer keypoints will be structured as such: 0: Nose 1: Left Eye 2: Right Eye 3: Left Ear 4: Right Ear 5: Left Shoulder 6: Right Shoulder 7: Left Elbow 8: Right Elbow 9: Left Wrist 10: Right Wrist 11: Left Hip 12: Right Hip 13: Left Knee 14: Right Knee 15: Left Ankle 16: Right Ankle.\nIf a keypoint is (0,0), then it has not beeen detected and should be deemed irrelevant. Here is how the output will be structured: \nFrame count\nPlayer 1 Keypoints\nPlayer 2 Keypoints\n Ball Position.\n\n"
+            )
         players = {}
         courtref = 0
         occlusion_times = {}
@@ -222,6 +234,8 @@ def main(path="C:\\Users\\default.DESKTOP-7FKFEEG\\Downloads\\farag v elshorbagy
         future_predict = None
         player_last_positions = {}
         frame_count = 0
+        ball_false_pos = []
+        past_ball_pos = []
         logging.getLogger("ultralytics").setLevel(logging.ERROR)
         video_out_path = output_path+"/annotated.mp4"
         fourcc = cv2.VideoWriter_fourcc(*"mp4v")
@@ -231,6 +245,8 @@ def main(path="C:\\Users\\default.DESKTOP-7FKFEEG\\Downloads\\farag v elshorbagy
         out = cv2.VideoWriter(video_out_path, fourcc, fps, (frame_width, frame_height))
         detections = []
         plast=[[],[]]
+        mainball = Ball(0, 0, 0, 0)
+        ballmap = np.zeros((frame_height, frame_width), dtype=np.float32)
         otherTrackIds = [[0, 0], [1, 1], [2, 2]]
         updated = [[False, 0], [False, 0]]
         reference_points = []
@@ -280,6 +296,7 @@ def main(path="C:\\Users\\default.DESKTOP-7FKFEEG\\Downloads\\farag v elshorbagy
             )
         np.zeros_like(heatmap_image, dtype=np.float32)
 
+        ballxy = []
         with open(f'{output_path}/reference_points.csv', 'w', newline='') as file:
             writer=csv.writer(file)
             writer.writerow(reference_points)
@@ -305,6 +322,7 @@ def main(path="C:\\Users\\default.DESKTOP-7FKFEEG\\Downloads\\farag v elshorbagy
 
             running_frame += 1
 
+            ball = ballmodel(frame)
 
             annotated_frame = frame.copy()
 
@@ -318,6 +336,93 @@ def main(path="C:\\Users\\default.DESKTOP-7FKFEEG\\Downloads\\farag v elshorbagy
                 )
 
             try:
+                highestconf = 0
+                x1 = x2 = y1 = y2 = 0
+                # Ball detection
+                ball = ballmodel(frame)
+                label = ""
+                try:
+                    # Get the last 10 positions
+                    start_idx = max(0, len(past_ball_pos) - 10)
+                    positions = past_ball_pos[start_idx:]
+                    # Loop through positions
+                    for i in range(len(positions)):
+                        pos = positions[i]
+                        # Draw circle with constant radius
+                        radius = 5  # Adjust as needed
+                        cv2.circle(
+                            annotated_frame, (pos[0], pos[1]), radius, (255, 255, 255), 2
+                        )
+                        # Draw line to next position
+                        if i < len(positions) - 1:
+                            next_pos = positions[i + 1]
+                            cv2.line(
+                                annotated_frame,
+                                (pos[0], pos[1]),
+                                (next_pos[0], next_pos[1]),
+                                (255, 255, 255),
+                                2,
+                            )
+                except Exception:
+                    pass
+                for box in ball[0].boxes:
+                    coords = box.xyxy[0] if len(box.xyxy) == 1 else box.xyxy
+                    x1temp, y1temp, x2temp, y2temp = coords
+                    label = ballmodel.names[int(box.cls)]
+                    confidence = float(box.conf)  # Convert tensor to float
+                    int((x1temp + x2temp) / 2)
+                    int((y1temp + y2temp) / 2)
+
+                    if confidence > highestconf:
+                        highestconf = confidence
+                        x1 = x1temp
+                        y1 = y1temp
+                        x2 = x2temp
+                        y2 = y2temp
+
+                cv2.rectangle(
+                    annotated_frame, (int(x1), int(y1)), (int(x2), int(y2)), (0, 255, 0), 2
+                )
+
+                cv2.putText(
+                    annotated_frame,
+                    f"{label} {highestconf:.2f}",
+                    (int(x1), int(y1) - 10),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.9,
+                    (0, 255, 0),
+                    2,
+                )
+
+                # print(label)
+                cv2.putText(
+                    annotated_frame,
+                    f"Frame: {frame_count}",
+                    (10, 30),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.9,
+                    (0, 255, 0),
+                    2,
+                )
+
+                avg_x = int((x1 + x2) / 2)
+                avg_y = int((y1 + y2) / 2)
+                size = avg_x * avg_y
+                if avg_x > 0 or avg_y > 0:
+                    if mainball.getlastpos()[0] != avg_x or mainball.getlastpos()[1] != avg_y:
+                        mainball.update(avg_x, avg_y, size)
+                        past_ball_pos.append([avg_x, avg_y, running_frame])
+                        math.hypot(
+                            avg_x - mainball.getlastpos()[0], avg_y - mainball.getlastpos()[1]
+                        )
+                        drawmap(
+                            mainball.getloc()[0],
+                            mainball.getloc()[1],
+                            mainball.getlastpos()[0],
+                            mainball.getlastpos()[1],
+                            ballmap,
+                        )
+
                 """
                 FRAMEPOSE
                 """
@@ -477,17 +582,16 @@ def main(path="C:\\Users\\default.DESKTOP-7FKFEEG\\Downloads\\farag v elshorbagy
                                 #print(f'kp: {kp}')
                                 print(f"could not find the player position for player {playerid}")
 
-
+                        # in the form of [ball shot type, player1 proximity to the ball, player2 proximity to the ball, ]
                         importantdata = []
                 except Exception as e:
                     print(f"got error in framepose: {e}")
                     print(f"line number was {sys.exc_info()[-1].tb_lineno}")
                     continue
             except Exception as e:
-                print(f"got error in framepose: {e}")
-                print(f"line number was {sys.exc_info()[-1].tb_lineno}")
+                print(f'got error in ballplayer detections: {e}')
+                print(f'line number was {sys.exc_info()[-1].tb_lineno}')
                 continue
-
             if players.get(1) and players.get(2) is not None:
                 if (
                     players.get(1).get_latest_pose()
@@ -665,13 +769,66 @@ def main(path="C:\\Users\\default.DESKTOP-7FKFEEG\\Downloads\\farag v elshorbagy
                 pass
             # Save the combined image
             # cv2.imwrite("output/heatmap_ankle.png", combined_image)
+            ballx = bally = 0
+            # ball stuff
+            if (
+                mainball is not None
+                and mainball.getlastpos() is not None
+                and mainball.getlastpos() != (0, 0)
+            ):
+                ballx = mainball.getlastpos()[0]
+                bally = mainball.getlastpos()[1]
+                if ballx != 0 and bally != 0:
+                    if [ballx, bally] not in ballxy:
+                        ballxy.append([ballx, bally, frame_count])
+                        # print(
+                        #     f"ballx: {ballx}, bally: {bally}, appended to ballxy with length {len(ballxy)} and frame count as : {frame_count}"
+                        # )
+
+            # Draw the ball trajectory
+            if len(ballxy) > 2:
+                for i in range(1, len(ballxy)):
+                    if ballxy[i - 1] is None or ballxy[i] is None:
+                        continue
+                    if ballxy[i][2] - ballxy[i - 1][2] < 7:
+                        if frame_count - ballxy[i][2] < 7:
+                            cv2.line(
+                                annotated_frame,
+                                (ballxy[i - 1][0], ballxy[i - 1][1]),
+                                (ballxy[i][0], ballxy[i][1]),
+                                (0, 255, 0),
+                                2,
+                            )
+                            cv2.circle(
+                                annotated_frame,
+                                (ballxy[i - 1][0], ballxy[i - 1][1]),
+                                5,
+                                (0, 255, 0),
+                                -1,
+                            )
+                            cv2.circle(
+                                annotated_frame,
+                                (ballxy[i][0], ballxy[i][1]),
+                                5,
+                                (0, 255, 0),
+                                -1,
+                            )
+
+
+            for ball_pos in ballxy:
+                if frame_count - ball_pos[2] < 7:
+                    # print(f'wrote to frame on line 1028 with coords: {ball_pos}')
+                    cv2.circle(
+                        annotated_frame, (ball_pos[0], ball_pos[1]), 5, (0, 255, 0), -1
+                    )
 
             #dump all data
-            def dump(path, player1kp, player2kp):
+            def dump(path, player1kp, player2kp, ballpos):
                 data = [
                     frame_count,
                     player1kp,
                     player2kp,
+                    ballpos,
                 ]
                 #write to a csv file
                 with open(path, 'a', newline='') as csvfile:
@@ -680,35 +837,43 @@ def main(path="C:\\Users\\default.DESKTOP-7FKFEEG\\Downloads\\farag v elshorbagy
                     import json
                     import os
 
-            def dump_json(path, player1kp, player2kp):
+            def dump_json(path, player1kp, player2kp, ballpos):
                 data = {
                     "frame_count": frame_count,
                     "player1_keypoints": player1kp,
                     "player2_keypoints": player2kp,
+                    "ball_position": ballpos,
                 }
 
-                try:
-                    # Read existing data
-                    if os.path.exists(path) and os.path.getsize(path) > 0:
-                        with open(path, 'r') as jsonfile:
-                            try:
-                                existing_data = json.load(jsonfile)
-                                if not isinstance(existing_data, list):
-                                    existing_data = []
-                            except json.JSONDecodeError:
-                                existing_data = []
-                    else:
-                        existing_data = []
-
-                    # Append new data
-                    existing_data.append(data)
-
-                    # Write back entire file
+                # Initialize file if it doesn't exist
+                if not os.path.exists(path):
                     with open(path, 'w') as jsonfile:
-                        json.dump(existing_data, jsonfile, indent=2)
+                        jsonfile.write('[\n]')
 
-                except Exception as e:
-                    print(f"Error in dump_json: {str(e)}")
+                file_size = os.path.getsize(path)
+
+                if file_size <= 2:  # File is empty or just contains []
+                    with open(path, 'w') as jsonfile:
+                        jsonfile.write('[\n')
+                        json.dump(data, jsonfile, indent=2)
+                        jsonfile.write('\n]')
+                else:
+                    with open(path, 'r+') as jsonfile:
+                        jsonfile.seek(file_size - 2)  # Move before the closing bracket
+                        jsonfile.write(',\n')
+                        json.dump(data, jsonfile, indent=2)
+                        jsonfile.write('\n]')
+
+            try:
+                dump_json(
+                    f'{output_path}/final.json',
+                    players.get(1).get_latest_pose().xyn.tolist(),
+                    players.get(2).get_latest_pose().xyn.tolist(),
+                    mainball.getloc()
+                )
+            except Exception as e:
+                print(f"Error writing JSON: {e}")
+                pass
             out.write(annotated_frame)
             cv2.imshow("Annotated Frame", annotated_frame)
 
