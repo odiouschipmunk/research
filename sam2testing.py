@@ -14,8 +14,8 @@ import shutil
 
 def initialize_sam2():
     """Initialize the SAM2 model with optimizations."""
-    sam2_checkpoint = "trained-models/sam2.1_hiera_tiny.pt"
-    model_cfg = "configs/sam2.1/sam2.1_hiera_t.yaml"
+    sam2_checkpoint = "trained-models/sam2.1_hiera_large.pt"
+    model_cfg = "configs/sam2.1/sam2.1_hiera_l.yaml"
     device = "cuda" if torch.cuda.is_available() else "cpu"
 
     if device == "cuda":
@@ -131,24 +131,52 @@ def track_squash_ball(input_path):
         first_frame = cv2.imread(frame_paths[0])
         window_name = "Click on the squash ball"
         cv2.namedWindow(window_name)
-        point = []
-        cv2.setMouseCallback(
-            window_name,
-            lambda event, x, y, flags, param: point.append((x, y))
-            or cv2.destroyWindow(window_name)
-            if event == cv2.EVENT_LBUTTONDOWN
-            else None,
-        )
-        cv2.imshow(window_name, first_frame)
-        cv2.waitKey(0)
+        positive_points = []
+        negative_points = []
 
-        if not point:
-            raise ValueError("No point selected")
+        def mouse_callback(event, x, y, flags, param):
+            if event == cv2.EVENT_LBUTTONDOWN:
+                positive_points.append((x, y))
+                # Draw red circle for positive point
+                cv2.circle(display_frame, (x, y), 5, (0, 0, 255), -1)
+                cv2.imshow(window_name, display_frame)
+            elif event == cv2.EVENT_RBUTTONDOWN:
+                negative_points.append((x, y))
+                # Draw blue circle for negative point
+                cv2.circle(display_frame, (x, y), 5, (255, 0, 0), -1)
+                cv2.imshow(window_name, display_frame)
 
-        processing_info["initial_point"] = point[0]
+        # Get initial points
+        first_frame = cv2.imread(frame_paths[0])
+        display_frame = first_frame.copy()
+        window_name = "Left click: Select ball | Right click: Select non-ball points | Press 's' to start"
+        cv2.namedWindow(window_name)
+        cv2.setMouseCallback(window_name, mouse_callback)
 
-        points = np.array([point[0]], dtype=np.float32)
-        labels = np.array([1], dtype=np.int32)
+        while True:
+            cv2.imshow(window_name, display_frame)
+            key = cv2.waitKey(1) & 0xFF
+            if key == ord('s'):  # Press 's' to start
+                if not positive_points:
+                    print("Please select at least one positive point before starting")
+                    continue
+                break
+            elif key == ord('q'):  # Press 'q' to quit
+                cv2.destroyAllWindows()
+                return
+
+        cv2.destroyAllWindows()
+
+        if not positive_points:
+            raise ValueError("No points selected")
+
+        processing_info["initial_positive_points"] = positive_points
+        processing_info["initial_negative_points"] = negative_points
+
+        # Combine positive and negative points
+        points = np.array(positive_points + negative_points, dtype=np.float32)
+        # 1 for positive points, 0 for negative points
+        labels = np.array([1] * len(positive_points) + [0] * len(negative_points), dtype=np.int32)
 
         with torch.cuda.amp.autocast():
             _, out_obj_ids, out_mask_logits = predictor.add_new_points_or_box(
@@ -305,5 +333,5 @@ def track_squash_ball(input_path):
 
 
 if __name__ == "__main__":
-    input_path = "farag_v_elshorbagy_1m_chopped_v2.mp4"
+    input_path = "farag v coll chopped 5sec.mp4"
     track_squash_ball(input_path)
