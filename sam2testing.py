@@ -14,8 +14,8 @@ import shutil
 
 def initialize_sam2():
     """Initialize the SAM2 model with optimizations."""
-    sam2_checkpoint = "trained-models/sam2.1_hiera_large.pt"
-    model_cfg = "configs/sam2.1/sam2.1_hiera_l.yaml"
+    sam2_checkpoint = "trained-models/sam2.1_hiera_small.pt"
+    model_cfg = "configs/sam2.1/sam2.1_hiera_s.yaml"
     device = "cuda" if torch.cuda.is_available() else "cpu"
 
     if device == "cuda":
@@ -333,5 +333,5 @@ def track_squash_ball(input_path):
 
 
 if __name__ == "__main__":
-    input_path = "farag v coll chopped 5sec.mp4"
+    input_path = "farag_v_elshorbagy_1m_chopped_v2.mp4"
     track_squash_ball(input_path)
