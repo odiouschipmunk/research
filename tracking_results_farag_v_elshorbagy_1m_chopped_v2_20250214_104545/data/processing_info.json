@@ -1,0 +1,15 @@
+{
+    "input_file": "farag_v_elshorbagy_1m_chopped_v2.mp4",
+    "processing_date": "2025-02-14 10:45:45",
+    "cuda_available": true,
+    "fps": 30.0,
+    "initial_positive_points": [
+        [
+            1131,
+            421
+        ]
+    ],
+    "initial_negative_points": [],
+    "total_frames": 1588,
+    "tracking_duration": 60.3
+}

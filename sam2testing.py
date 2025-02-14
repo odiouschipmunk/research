@@ -14,8 +14,8 @@ import shutil
 
 def initialize_sam2():
     """Initialize the SAM2 model with optimizations."""
-    sam2_checkpoint = "trained-models/sam2.1_hiera_small.pt"
-    model_cfg = "configs/sam2.1/sam2.1_hiera_s.yaml"
+    sam2_checkpoint = "trained-models/sam2.1_hiera_base_plus.pt"
+    model_cfg = "configs/sam2.1/sam2.1_hiera_b+.yaml"
     device = "cuda" if torch.cuda.is_available() else "cpu"
 
     if device == "cuda":
