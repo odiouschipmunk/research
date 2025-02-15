@@ -121,7 +121,7 @@ def track_squash_ball(input_path):
                     if f.endswith((".jpg", ".png"))
                 ]
             )
-            fps = 30.0
+            fps = 10.0
             processing_info["fps"] = fps
 
         predictor = initialize_sam2()
