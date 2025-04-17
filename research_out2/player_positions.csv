@@ -1,0 +1,1 @@
+frame,time_sec,player_id,x,y,confidence,keypoints,court_region,court_side,total_distance_moved,recent_movement_intensity,avg_recovery_time,movement_variability,direction_changes,times_near_ball,total_shots,court_coverage_json,shots_by_region_json

@@ -20,11 +20,23 @@ import json
 import argparse
 import logging
 import traceback
+import re # Added for HTML formatting in LLM output
 from typing import Dict, List, Tuple, Optional, Set, Union, Any, Deque
 from dataclasses import dataclass
-from collections import deque
+from collections import deque, Counter # Added Counter
 from tqdm import tqdm
 import pandas as pd
+try:
+    from scipy.optimize import linear_sum_assignment
+except ImportError:
+    linear_sum_assignment = None # Handle optional import
+    print("Warning: SciPy not found. Player assignment will use basic logic. Install SciPy for optimal tracking: pip install scipy")
+from scipy.spatial import distance as spatial_distance # Added for distance calculation
+from sklearn.preprocessing import MinMaxScaler # Added for radar chart normalization
+from matplotlib.patches import Patch # Added for potential custom legends
+import matplotlib.colors as mcolors # Added for color handling
+import textwrap # Added for wrapping text in visualizations
+
 try:
     from transformers import AutoModelForCausalLM, AutoTokenizer, pipeline
     HAS_TRANSFORMERS = True
@@ -323,6 +335,9 @@ class PlayerTracker:
         self.recovery_time_buffer: Deque[float] = deque(maxlen=20)  # Store recovery times
         self.lastSprintTime: float = 0
         self.current_time: float = 0
+        self.sprint_count: int = 0 # Added sprint count
+        self.avg_speed: float = 0.0 # Added average speed tracking
+        self.movement_speeds: Deque[float] = deque(maxlen=300) # Track recent speeds
     
     def update_position_preference(self, region: str, side: str) -> None:
         """Update player's court position preference model"""
@@ -456,15 +471,14 @@ class PlayerTracker:
                 distance = np.sqrt((center[0] - prev_pos[0])**2 + (center[1] - prev_pos[1])**2)
                 self.total_distance_moved += distance
                 
-                # Track per-second movement
-                time_sec = int(current_time)
-                if time_sec < len(self.movement_per_second):
-                    self.movement_per_second[time_sec] += distance
-                else:
-                    # Extend list if needed
-                    self.movement_per_second.extend([0] * (time_sec - len(self.movement_per_second) + 1))
-                    self.movement_per_second[time_sec] = distance
-                
+                # Calculate speed (distance / time_delta)
+                # Assuming consistent frame rate for now (or pass time_delta)
+                # Placeholder: Estimate speed based on distance per frame
+                speed = distance # Simplified speed metric (pixels/frame)
+                self.movement_speeds.append(speed)
+                if self.movement_speeds:
+                    self.avg_speed = np.mean(list(self.movement_speeds))
+
                 # Track movement for fatigue analysis
                 self.movement_buffer.append(distance)
                 
@@ -493,10 +507,12 @@ class PlayerTracker:
         if self.movement_buffer:
             recent_movement = sum(self.movement_buffer) / len(self.movement_buffer)
             # If player is moving at high speed (sprint)
-            if recent_movement > 15:  # Threshold for sprint
+            if recent_movement > 15 and self.avg_speed > 10:  # Threshold for sprint (avg pixel dist/frame)
+                if current_time - self.lastSprintTime > 1.0: # Avoid counting same sprint multiple times
+                    self.sprint_count += 1
                 self.lastSprintTime = current_time
             # If player was sprinting and now is moving slowly, record recovery time
-            elif self.lastSprintTime > 0 and recent_movement < 5:  # Threshold for slow movement
+            elif self.lastSprintTime > 0 and recent_movement < 5 and self.avg_speed < 5:  # Threshold for slow movement
                 recovery_time = current_time - self.lastSprintTime
                 if recovery_time < 10:  # Only count reasonable recovery times
                     self.recovery_time_buffer.append(recovery_time)
@@ -561,12 +577,13 @@ class PlayerTracker:
         
         # Track player's proximity to ball
         if ball_pos is not None:
-            distance_to_ball = np.sqrt((center[0] - ball_pos[0])**2 + (center[1] - ball_pos[1])**2)
+            distance_to_ball = spatial_distance.euclidean(center, ball_pos) # Use scipy distance
             if distance_to_ball < 100:  # Threshold for being "near" the ball
                 self.near_ball_count += 1
-                
+
                 # If player changes direction close to ball, likely making a shot
-                if self.direction_changes > 0 and len(self.stroke_positions) == 0 or self.stroke_positions[-1][0] != center:
+                # Check if the stroke position is significantly different from the last one to avoid duplicates
+                if self.direction_changes > 0 and (not self.stroke_positions or spatial_distance.euclidean(center, self.stroke_positions[-1][0]) > 20):
                     self.stroke_positions.append((center, court_region + "-" + court_side))
         
         # Reset missing frames counter
@@ -606,10 +623,16 @@ class PlayerTracker:
             
         # Direction changes per unit of distance (higher = less efficient movement)
         if self.total_distance_moved > 0:
-            metrics['direction_changes_per_distance'] = self.direction_changes / (self.total_distance_moved / 1000)
+            # Normalize distance (e.g., per 1000 pixels)
+            metrics['direction_changes_per_1k_pixels'] = self.direction_changes / (self.total_distance_moved / 1000) if self.total_distance_moved > 0 else 0
         else:
-            metrics['direction_changes_per_distance'] = 0.0
-            
+            metrics['direction_changes_per_1k_pixels'] = 0.0
+
+        # Add sprint count
+        metrics['sprint_count'] = self.sprint_count
+        # Add average speed
+        metrics['average_speed'] = self.avg_speed
+
         return metrics
         
     def get_stroke_metrics(self) -> Dict[str, Any]:
@@ -690,8 +713,8 @@ class PlayerTrackingManager:
         self.current_time = 0.0
         self.ball_position = None
         self.player_interactions = 0  # Count when players are close to each other
-        self.rallies_detected = 0  # Count detected rallies based on player-ball interactions
-        self.shots_detected = {1: 0, 2: 0}  # Count shots by player
+        self.rallies_detected = 0  # Count detected rallies based on player-ball interactions (Note: This might be better handled by ShotClassifier)
+        self.shots_detected = {1: 0, 2: 0}  # Count shots by player (Note: Redundant if using ShotClassifier)
         self.last_player_near_ball = None  # Track which player was last near the ball
         
     def _get_court_region(self, y: float, height: int) -> str:
@@ -742,11 +765,10 @@ class PlayerTrackingManager:
                     
                     # 1. Position-based distance score (inversely proportional to distance)
                     if player_predicted_pos is not None and np.all(np.isfinite(player_predicted_pos)):
-                        pos_dist = np.sqrt((player_predicted_pos[0] - det_center[0])**2 + 
-                                        (player_predicted_pos[1] - det_center[1])**2)
-                        
+                        pos_dist = spatial_distance.euclidean(player_predicted_pos, det_center) # Use scipy
+
                         # Normalize distance (closer = higher score)
-                        max_dist = np.sqrt(self.frame_dimensions[0]**2 + self.frame_dimensions[1]**2)
+                        max_dist = np.sqrt(self.frame_dimensions[0]**2 + self.frame_dimensions[1]**2) if self.frame_dimensions else 1000
                         position_score = 1.0 - min(1.0, pos_dist / (max_dist/2))
                     else:
                         position_score = 0.5  # Neutral if no position history
@@ -760,8 +782,8 @@ class PlayerTrackingManager:
                             appearance_score = player.compare_appearance(features)
                     
                     # 3. Court region/side consistency score
-                    region = self._get_court_region(det_center[1], self.frame_dimensions[1])
-                    side = self._get_court_side(det_center[0], self.frame_dimensions[0])
+                    region = self._get_court_region(det_center[1], self.frame_dimensions[1]) if self.frame_dimensions else "Middle"
+                    side = self._get_court_side(det_center[0], self.frame_dimensions[0]) if self.frame_dimensions else "Left"
                     position_preference_score = player.get_position_similarity_score(region, side)
                     
                     # 4. Movement consistency score - how well the detection matches player's velocity
@@ -773,8 +795,8 @@ class PlayerTrackingManager:
                             expected_pos = (last_pos[0] + player.velocity[0], last_pos[1] + player.velocity[1])
                             
                             # Calculate how well the detection matches the expected position
-                            exp_dist = np.sqrt((expected_pos[0] - det_center[0])**2 + 
-                                            (expected_pos[1] - det_center[1])**2)
+                            exp_dist = spatial_distance.euclidean(expected_pos, det_center) # Use scipy
+                            max_dist = np.sqrt(self.frame_dimensions[0]**2 + self.frame_dimensions[1]**2) if self.frame_dimensions else 1000
                             movement_score = 1.0 - min(1.0, exp_dist / (max_dist/3))
                     
                     # Combine scores with different weights
@@ -799,74 +821,97 @@ class PlayerTrackingManager:
                     player_id = i + 1
                     # Determine court region and side
                     det_center = det.center
-                    region = self._get_court_region(det_center[1], self.frame_dimensions[1]) 
-                    side = self._get_court_side(det_center[0], self.frame_dimensions[0])
+                    region = self._get_court_region(det_center[1], self.frame_dimensions[1]) if self.frame_dimensions else "Middle"
+                    side = self._get_court_side(det_center[0], self.frame_dimensions[0]) if self.frame_dimensions else "Left"
                     # Update player state
-                    self.players[player_id].update_state(det, frame, region, side, 
+                    self.players[player_id].update_state(det, frame, region, side,
                                                        self.current_time, self.ball_position)
             return
         
         # Use Hungarian algorithm for optimal assignment
         try:
-            from scipy.optimize import linear_sum_assignment
-            
+            if linear_sum_assignment is None:
+                 raise ImportError("SciPy not found, using fallback assignment.")
+
             # Create cost matrix (negative similarity for minimization)
             player_ids = list(self.players.keys())
             det_indices = list(range(len(detections)))
-            
-            cost_matrix = np.ones((len(player_ids), len(det_indices)))
-            
+
+            cost_matrix = np.ones((len(player_ids), len(det_indices))) * 1.0 # Default cost is high (1.0)
+
             for (pid, did), score in similarity_scores.items():
                 player_idx = player_ids.index(pid)
                 if player_idx < len(player_ids) and did < len(det_indices):
                     # Convert similarity to cost (higher similarity = lower cost)
                     cost_matrix[player_idx, did] = 1.0 - score
-            
+
             # Solve assignment problem
             row_ind, col_ind = linear_sum_assignment(cost_matrix)
-            
+
             # Update player states with assigned detections
             assigned_dets = set()
+            assigned_players_map = {} # Track which player got which detection index
             for pid_idx, det_idx in zip(row_ind, col_ind):
                 if pid_idx < len(player_ids) and det_idx < len(detections):
                     player_id = player_ids[pid_idx]
                     det = detections[det_idx]
-                    
+
                     # Determine court region and side
                     det_center = det.center
-                    region = self._get_court_region(det_center[1], self.frame_dimensions[1])
-                    side = self._get_court_side(det_center[0], self.frame_dimensions[0])
-                    
+                    region = self._get_court_region(det_center[1], self.frame_dimensions[1]) if self.frame_dimensions else "Middle"
+                    side = self._get_court_side(det_center[0], self.frame_dimensions[0]) if self.frame_dimensions else "Left"
+
                     # Only update if similarity is high enough
                     score = 1.0 - cost_matrix[pid_idx, det_idx]
                     if score >= 0.3:  # Threshold for assignment
                         # Update player state with ball position
-                        self.players[player_id].update_state(det, frame, region, side, 
+                        self.players[player_id].update_state(det, frame, region, side,
                                                            self.current_time, self.ball_position)
                         assigned_dets.add(det_idx)
+                        assigned_players_map[player_id] = det_idx
                     else:
                         # Mark as missing if similarity is too low
+                        logger.debug(f"Player {player_id} detection score {score:.2f} too low, marking missing.")
                         self.players[player_id].mark_missing()
-            
+
             # Mark unassigned players as missing
             for player_id in player_ids:
-                if player_id not in [player_ids[i] for i in row_ind]:
+                if player_id not in assigned_players_map:
+                    logger.debug(f"Player {player_id} not assigned, marking missing.")
                     self.players[player_id].mark_missing()
-                    
+
+        except ImportError:
+            logger.warning("SciPy not found. Falling back to simpler assignment logic. Install SciPy for optimal player tracking.")
+            # Fallback: Assign first N detections to first N players
+            assigned_dets = set()
+            for i, det in enumerate(detections):
+                if i < len(self.players):
+                    player_id = i + 1
+                    det_center = det.center
+                    region = self._get_court_region(det_center[1], self.frame_dimensions[1]) if self.frame_dimensions else "Middle"
+                    side = self._get_court_side(det_center[0], self.frame_dimensions[0]) if self.frame_dimensions else "Left"
+                    self.players[player_id].update_state(det, frame, region, side,
+                                                       self.current_time, self.ball_position)
+                    assigned_dets.add(i)
+
+            # Mark players without detections as missing
+            for player_id in self.players.keys():
+                if player_id > len(detections): # Simple index check for fallback
+                    self.players[player_id].mark_missing()
         except Exception as e:
             logger.warning(f"Error in detection assignment: {e}")
-            # Fallback to simpler assignment
+            # Fallback to simple assignment if Hungarian fails
             for i, det in enumerate(detections):
                 if i < len(self.players):
                     player_id = i + 1
                     # Determine court region and side
                     det_center = det.center
-                    region = self._get_court_region(det_center[1], self.frame_dimensions[1])
-                    side = self._get_court_side(det_center[0], self.frame_dimensions[0])
+                    region = self._get_court_region(det_center[1], self.frame_dimensions[1]) if self.frame_dimensions else "Middle"
+                    side = self._get_court_side(det_center[0], self.frame_dimensions[0]) if self.frame_dimensions else "Left"
                     # Update player state with ball position
-                    self.players[player_id].update_state(det, frame, region, side, 
+                    self.players[player_id].update_state(det, frame, region, side,
                                                        self.current_time, self.ball_position)
-                                                       
+
         # After updating player states, update game events
         self._update_game_events()
     
@@ -895,8 +940,7 @@ class PlayerTrackingManager:
         # Check for player-ball interactions
         for player_id, player in self.players.items():
             if player.center is not None:
-                dist_to_ball = np.sqrt((player.center[0] - self.ball_position[0])**2 + 
-                                      (player.center[1] - self.ball_position[1])**2)
+                dist_to_ball = spatial_distance.euclidean(player.center, self.ball_position)
                 
                 # If player is close to ball
                 if dist_to_ball < 100:
@@ -933,16 +977,49 @@ class PlayerTrackingManager:
             
             # Get court coverage metrics
             court_coverage = {}
-            total_frames = sum(player.time_in_regions.values())
-            if total_frames > 0:
+            time_in_t = 0
+            total_frames_tracked = 0 # Count frames where player was actually tracked
+            if player.positions:
+                 total_frames_tracked = sum(1 for pos in player.positions if pos is not None)
+
+            if total_frames_tracked > 0:
+                # Calculate time in T-zone
+                for pos in player.positions:
+                     if pos and t_zone_x_range[0] <= pos[0] <= t_zone_x_range[1] and t_zone_y_range[0] <= pos[1] <= t_zone_y_range[1]:
+                         time_in_t += 1
+
+                # Normalize region/side times by tracked frames instead of total video frames
+                total_region_frames = sum(player.time_in_regions.values()) # Use the sum from player tracker
+                total_side_frames = sum(player.time_on_sides.values())
+
                 court_coverage = {
-                    'front_pct': player.time_in_regions['Front'] / total_frames * 100,
-                    'middle_pct': player.time_in_regions['Middle'] / total_frames * 100,
-                    'back_pct': player.time_in_regions['Back'] / total_frames * 100,
-                    'left_pct': player.time_in_sides['Left'] / total_frames * 100,
-                    'right_pct': player.time_in_sides['Right'] / total_frames * 100
+                    'front_pct': player.time_in_regions['Front'] / total_region_frames * 100 if total_region_frames > 0 else 0,
+                    'middle_pct': player.time_in_regions['Middle'] / total_region_frames * 100 if total_region_frames > 0 else 0,
+                    'back_pct': player.time_in_regions['Back'] / total_region_frames * 100 if total_region_frames > 0 else 0,
+                    'left_pct': player.time_on_sides['Left'] / total_side_frames * 100 if total_side_frames > 0 else 0,
+                    'right_pct': player.time_on_sides['Right'] / total_side_frames * 100 if total_side_frames > 0 else 0,
+                    't_zone_pct': time_in_t / total_frames_tracked * 100 if total_frames_tracked > 0 else 0
                 }
-            
+
+            # Movement efficiency (simplified: distance per frame tracked)
+            movement_efficiency = player.total_distance_moved / total_frames_tracked if total_frames_tracked > 0 else 0
+
+            # Dominance metric (Placeholder: combination of T-zone control and shots/ball proximity)
+            # Weight T-zone control, near ball count, and maybe shots initiated
+            t_zone_weight = 0.5
+            near_ball_weight = 0.3
+            shots_weight = 0.2 # Weight for shots (could use stroke_metrics['total_shots'] instead of self.shots_detected)
+            total_shots_game = sum(p.get_stroke_metrics().get('total_shots', 0) for p in self.players.values()) # Use stroke metrics count
+            total_near_ball_game = sum(p.near_ball_count for p in self.players.values())
+
+            t_zone_term = (court_coverage.get('t_zone_pct', 0) / 100.0) * t_zone_weight if court_coverage.get('t_zone_pct', 0) else 0
+            near_ball_term = (player.near_ball_count / max(1, total_near_ball_game)) * near_ball_weight if total_near_ball_game > 0 else 0
+            player_total_shots = stroke_metrics.get('total_shots', 0)
+            shots_term = (player_total_shots / max(1, total_shots_game)) * shots_weight if total_shots_game > 0 else 0
+
+            dominance_score = t_zone_term + near_ball_term + shots_term
+
+
             # Combine all metrics
             metrics['player_metrics'][player_id] = {
                 'fatigue': fatigue_metrics,
@@ -950,7 +1027,10 @@ class PlayerTrackingManager:
                 'court_coverage': court_coverage,
                 'total_distance': player.total_distance_moved,
                 'direction_changes': player.direction_changes,
-                'times_near_ball': player.near_ball_count
+                'times_near_ball': player.near_ball_count,
+                'avg_speed': player.avg_speed,
+                'movement_efficiency': movement_efficiency,
+                'dominance_score': dominance_score
             }
         
         return metrics
@@ -1304,11 +1384,13 @@ class SquashAnalyzer:
         self.shot_classifier = ShotClassifier()
         
         # Data collection
-        self.ball_positions = []
-        self.player_positions = []
-        
-        # Player position history for shot attribution
-        self.player_positions_history = []
+        self.ball_positions: List[Tuple[int, float, float, float, float, bool]] = [] # Store tuples (frame, time, x, y, conf, estimated)
+        # Player position storage is handled within PlayerTracker instances mainly
+
+        # Player position history for shot attribution and analysis
+        self.player_positions_history: List[Dict[int, Tuple[float, float]]] = [] # Simpler: list of {player_id: (x,y)} per frame
+        self.game_events: List[Dict[str, Any]] = [] # Store key events like shots, rallies
+        self.frame_rate: Optional[float] = None
         
     def _initialize_models(self):
         """Initialize YOLO models for ball and player detection"""
@@ -1371,11 +1453,13 @@ class SquashAnalyzer:
         video_name = os.path.splitext(os.path.basename(video_path))[0]
         ball_output_video = os.path.join(output_dir, f"{video_name}_ball_tracked.mp4")
         player_output_video = os.path.join(output_dir, f"{video_name}_player_tracked.mp4")
+        combined_output_video = os.path.join(output_dir, f"{video_name}_combined_analysis.mp4")
         
         # Try different codecs if the default doesn't work
         codecs = ['mp4v', 'avc1', 'H264', 'DIVX']
         ball_out = None
         player_out = None
+        combined_out = None # Added writer for combined visualization
         
         for codec in codecs:
             try:
@@ -1386,24 +1470,51 @@ class SquashAnalyzer:
                 # Test if the video writers are working
                 if ball_out.isOpened() and player_out.isOpened():
                     logger.info(f"Using codec: {codec}")
-                    break
+                    # Also initialize combined writer
+                    combined_out = cv2.VideoWriter(combined_output_video, fourcc, fps, (width, height))
+                    if combined_out.isOpened():
+                         logger.info(f"Initialized combined video writer with codec: {codec}")
+                         break
+                    else:
+                        logger.warning(f"Failed to initialize combined video writer with codec: {codec}")
+                        if ball_out: ball_out.release()
+                        if player_out: player_out.release()
+                        ball_out = None
+                        player_out = None
+                        combined_out = None
                 else:
                     # Close the writers and try the next codec
-                    ball_out.release()
-                    player_out.release()
+                    if ball_out: ball_out.release()
+                    if player_out: player_out.release()
                     ball_out = None
                     player_out = None
-            except Exception as e:
-                logger.warning(f"Failed to initialize video writer with codec {codec}: {e}")
-                if ball_out is not None:
-                    ball_out.release()
-                if player_out is not None:
-                    player_out.release()
-                ball_out = None
-                player_out = None
-        
-        if ball_out is None or player_out is None:
-            raise RuntimeError("Could not initialize video writers with any supported codec")
+
+            except Exception as e: # Add this except block
+                logger.warning(f"Codec {codec} failed during initialization: {e}")
+                # Ensure writers are released if an error occurred mid-initialization
+                if ball_out: ball_out.release()
+                if player_out: player_out.release()
+                if combined_out: combined_out.release()
+                ball_out, player_out, combined_out = None, None, None # Reset before next iteration
+                continue # Try the next codec
+
+        if ball_out is None or player_out is None or combined_out is None:
+            # Attempt default 'mp4v' one last time before raising error
+            logger.info("Attempting fallback codec: mp4v")
+            fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+            ball_out = cv2.VideoWriter(ball_output_video, fourcc, fps, (width, height))
+            player_out = cv2.VideoWriter(player_output_video, fourcc, fps, (width, height))
+            combined_out = cv2.VideoWriter(combined_output_video, fourcc, fps, (width, height))
+            if not (ball_out.isOpened() and player_out.isOpened() and combined_out.isOpened()):
+                # Log the error and then raise
+                error_msg = "Could not initialize video writers even with fallback codec 'mp4v'"
+                logger.error(error_msg)
+                # Release any potentially opened writers before erroring
+                if ball_out: ball_out.release()
+                if player_out: player_out.release()
+                if combined_out: combined_out.release()
+                raise RuntimeError(error_msg)
+            logger.info("Successfully initialized writers with fallback codec: mp4v")
         
         # Initialize CSV files with expanded headers for enhanced metrics
         ball_csv_path = os.path.join(output_dir, "ball_positions.csv")
@@ -1419,17 +1530,21 @@ class SquashAnalyzer:
         ball_writer.writerow(['frame', 'time_sec', 'x', 'y', 'confidence', 'estimated', 
                             'velocity_x', 'velocity_y', 'speed', 'velocity_change',
                             'shot_detected', 'shot_type', 'shot_confidence',
-                            'court_region', 'court_side'])
+                            'court_region', 'court_side', 'rally_id', 'shot_player_id']) # Added rally_id and shot_player_id
         player_writer.writerow(['frame', 'time_sec', 'player_id', 'x', 'y', 'confidence', 
-                              'keypoints', 'court_region', 'court_side', 'total_distance_moved',
-                              'recent_movement_intensity', 'avg_recovery_time', 
-                              'movement_variability', 'direction_changes', 'times_near_ball',
-                              'total_shots', 'court_coverage_json', 'shots_by_region_json'])
+                              'keypoints_json', 'court_region', 'court_side', 'total_distance_moved',
+                              'avg_speed', 'sprint_count', # Added speed/sprints
+                              'recent_movement_intensity', 'avg_recovery_time',
+                              'movement_variability', 'direction_changes', 'direction_changes_per_1k_pixels', # Added norm direction changes
+                              'times_near_ball', 'total_shots', 'court_coverage_json',
+                              'shots_by_region_json', 'movement_efficiency', 'dominance_score', 't_zone_pct']) # Added efficiency/dominance/t_zone
         
         # Process video frame by frame
         frame_number = 0
         logger.info(f"Processing video: {video_path} ({total_frames} frames)")
         
+        self.frame_rate = fps # Store frame rate
+
         try:
             with tqdm(total=total_frames, desc="Processing frames") as pbar:
                 while True:
@@ -1442,12 +1557,14 @@ class SquashAnalyzer:
                     try:
                         # Process ball tracking
                         ball_results = self.ball_model(frame, conf=self.ball_conf_threshold, verbose=False)
-                        ball_frame = self._process_ball_tracking(frame, ball_results, frame_number, time_sec, ball_writer)
+                        ball_frame, ball_data = self._process_ball_tracking(frame, ball_results, frame_number, time_sec, ball_writer)
                         
                         # Process player tracking
                         player_results = self.player_model.track(frame, conf=self.player_conf_threshold, 
                                                             persist=True, verbose=False, classes=0)
-                        player_frame = self._process_player_tracking(frame, player_results, frame_number, time_sec, player_writer)
+                        # Get ball position for player tracking context
+                        current_ball_pos = (ball_data['position'][0], ball_data['position'][1]) if ball_data and ball_data['position'] else None
+                        player_frame, player_data_list = self._process_player_tracking(frame, player_results, frame_number, time_sec, player_writer, current_ball_pos)
                         
                         # Capture player positions for shot attribution
                         current_positions = {}
@@ -1459,21 +1576,29 @@ class SquashAnalyzer:
                         # Write frames
                         ball_out.write(ball_frame)
                         player_out.write(player_frame)
+
+                        # Create and write combined frame
+                        combined_frame = self._create_combined_visualization(frame, ball_data, player_data_list)
+                        if combined_frame is not None:
+                            combined_out.write(combined_frame)
                     except Exception as e:
                         logger.error(f"Error processing frame {frame_number}: {e}")
                         traceback.print_exc()
-                        # Continue with next frame
-                    
+                        # Continue with next frame if one fails
+                        pass
+
                     frame_number += 1
                     pbar.update(1)
         finally:
             # Release resources
+            logger.info("Releasing video capture and writers...")
             cap.release()
-            ball_out.release()
-            player_out.release()
-            ball_csv.close()
-            player_csv.close()
-            
+            if ball_out: ball_out.release()
+            if player_out: player_out.release()
+            if combined_out: combined_out.release() # Release combined writer
+            if ball_csv: ball_csv.close()
+            if player_csv: player_csv.close()
+
         logger.info(f"Processed {frame_number} frames")
         
         # Generate analysis
@@ -1482,6 +1607,7 @@ class SquashAnalyzer:
         return {
             'ball_video': ball_output_video,
             'player_video': player_output_video,
+            'combined_video': combined_output_video,
             'ball_csv': ball_csv_path,
             'player_csv': player_csv_path,
             'analysis': analysis_results
@@ -1584,7 +1710,7 @@ class SquashAnalyzer:
                         self.shot_classifier.set_court_dimensions(frame.shape[1], frame.shape[0])
                     
                     # Use advanced shot classifier
-                    shot_detected, shot_type, shot_confidence = self.shot_classifier.detect_and_classify_shot(
+                    shot_detected, shot_type, shot_confidence, shot_player_id = self.shot_classifier.detect_and_classify_shot(
                         frame_number=frame_number,
                         position=position,
                         velocity=velocity,
@@ -1600,7 +1726,7 @@ class SquashAnalyzer:
                     csv_writer.writerow([
                         frame_number, time_sec, center_x, center_y, ball_confidence, estimated,
                         velocity[0], velocity[1], speed, velocity_change, shot_detected, shot_type,
-                        shot_confidence, court_region, court_side
+                        shot_confidence, court_region, court_side, self.shot_classifier.current_rally, shot_player_id
                     ])
                     
                     # Draw ball position
@@ -1650,21 +1776,14 @@ class SquashAnalyzer:
             logger.error(f"Error in ball tracking: {e}")
             traceback.print_exc()
         
-        return display_frame
+        return display_frame, {'position': position, 'velocity': velocity, 'speed': speed, 'shot_detected': shot_detected, 'shot_type': shot_type, 'shot_confidence': shot_confidence, 'shot_player_id': shot_player_id}
     
     def _process_player_tracking(self, frame: np.ndarray, results: Any, frame_number: int,
-                               time_sec: float, csv_writer: csv.writer) -> np.ndarray:
+                               time_sec: float, csv_writer: csv.writer, ball_position: Tuple[int, int]) -> np.ndarray:
         """Process player tracking for a single frame"""
         display_frame = frame.copy()
         
         try:
-            # Get current ball position for player tracking
-            ball_position = None
-            if hasattr(self, 'ball_positions') and self.ball_positions:
-                last_ball_pos = self.ball_positions[-1]
-                if isinstance(last_ball_pos, tuple) and len(last_ball_pos) == 2:
-                    ball_position = last_ball_pos
-            
             # Process player detections
             if results and len(results[0].boxes) > 0:
                 boxes = results[0].boxes
@@ -1680,6 +1799,7 @@ class SquashAnalyzer:
                 game_metrics = self.player_tracking_manager.get_game_metrics()
                 
                 # Save player data to CSV with enhanced metrics
+                player_data_for_frame = []
                 for player_id, player in self.player_tracking_manager.players.items():
                     if player.bbox is not None:
                         center = player.center
@@ -1689,46 +1809,7 @@ class SquashAnalyzer:
                             court_side = self._get_court_side(center_x, frame.shape[1])
                             
                             # Convert keypoints properly for JSON serialization
-                            keypoints_data = []
-                            if player.keypoints is not None:
-                                try:
-                                    # If already a numpy array, just convert to list
-                                    if isinstance(player.keypoints, np.ndarray):
-                                        keypoints_data = player.keypoints.tolist()
-                                    # If it's a list, use it directly
-                                    elif isinstance(player.keypoints, list):
-                                        keypoints_data = player.keypoints
-                                    # If it's an Ultralytics Keypoints object
-                                    elif hasattr(player.keypoints, 'xy') and hasattr(player.keypoints, 'conf'):
-                                        # Get coordinates and confidence values
-                                        kpts_xy = player.keypoints.xy.cpu().numpy()
-                                        conf = player.keypoints.conf.cpu().numpy()
-                                        
-                                        # Fix shape issues if needed
-                                        num_keypoints = kpts_xy.shape[0]
-                                        if len(kpts_xy.shape) > 2:  # If shape is (1, 17, 2) or similar
-                                            kpts_xy = kpts_xy.reshape(num_keypoints, 2)
-                                        
-                                        if len(conf.shape) > 1:  # If shape is (1, 17) or similar
-                                            conf = conf.reshape(num_keypoints)
-                                        
-                                        # Create a list of [x, y, conf] for each keypoint
-                                        keypoints_data = []
-                                        for j in range(num_keypoints):
-                                            keypoints_data.append([
-                                                float(kpts_xy[j, 0]),
-                                                float(kpts_xy[j, 1]),
-                                                float(conf[j])
-                                            ])
-                                except Exception as e:
-                                    logger.warning(f"Error serializing keypoints: {e}")
-                                    logger.warning(f"Keypoint type: {type(player.keypoints)}")
-                                    if hasattr(player.keypoints, '__dict__'):
-                                        logger.warning(f"Keypoint attributes: {player.keypoints.__dict__}")
-                                    else:
-                                        logger.warning(f"Available attributes: {dir(player.keypoints)}")
-                                    # Fall back to empty list
-                                    keypoints_data = []
+                            keypoints_data = self._serialize_keypoints(player.keypoints)
                             
                             # Get player-specific metrics for enhanced CSV
                             player_metrics = game_metrics['player_metrics'].get(player_id, {})
@@ -1741,20 +1822,52 @@ class SquashAnalyzer:
                                 json.dumps(keypoints_data),
                                 court_region, court_side,
                                 player.total_distance_moved,
+                                player.avg_speed,
+                                player.sprint_count,
                                 fatigue_metrics.get('recent_movement_intensity', 0),
                                 fatigue_metrics.get('avg_recovery_time', 0),
                                 fatigue_metrics.get('movement_variability', 0),
                                 player.direction_changes,
+                                player.direction_changes_per_1k_pixels,
                                 player.near_ball_count,
                                 player_metrics.get('strokes', {}).get('total_shots', 0),
                                 json.dumps(player_metrics.get('court_coverage', {})),
-                                json.dumps(player_metrics.get('strokes', {}).get('shots_by_region', {}))
+                                json.dumps(player_metrics.get('strokes', {}).get('shots_by_region', {})),
+                                player.movement_efficiency,
+                                player.dominance_score,
+                                player.t_zone_pct
                             ])
+                            
+                            player_data_for_frame.append({
+                                'player_id': player_id,
+                                'center': center,
+                                'keypoints': keypoints_data,
+                                'court_region': court_region,
+                                'court_side': court_side,
+                                'total_distance_moved': player.total_distance_moved,
+                                'avg_speed': player.avg_speed,
+                                'sprint_count': player.sprint_count,
+                                'recent_movement_intensity': fatigue_metrics.get('recent_movement_intensity', 0),
+                                'avg_recovery_time': fatigue_metrics.get('avg_recovery_time', 0),
+                                'movement_variability': fatigue_metrics.get('movement_variability', 0),
+                                'direction_changes': player.direction_changes,
+                                'direction_changes_per_1k_pixels': player.direction_changes_per_1k_pixels,
+                                'times_near_ball': player.near_ball_count,
+                                'total_shots': player_metrics.get('strokes', {}).get('total_shots', 0),
+                                'court_coverage': player_metrics.get('court_coverage', {}),
+                                'shots_by_region': player_metrics.get('strokes', {}).get('shots_by_region', {}),
+                                'movement_efficiency': player.movement_efficiency,
+                                'dominance_score': player.dominance_score,
+                                't_zone_pct': player.t_zone_pct
+                            })
+            else:
+                # No player detections in this frame
+                player_data_for_frame = []
         except Exception as e:
             logger.error(f"Error in player tracking: {e}")
             traceback.print_exc()
         
-        return display_frame
+        return display_frame, player_data_for_frame
     
     def _get_court_region(self, y: float, height: int) -> str:
         """Determine court region based on y position"""
@@ -2273,252 +2386,6 @@ class SquashAnalyzer:
             logger.error(f"Error generating LLM analysis: {e}")
             traceback.print_exc()
             return None
-
-    def _generate_visualizations(self, ball_df: pd.DataFrame, player_df: pd.DataFrame, 
-                               output_dir: str) -> Dict[str, str]:
-        """Generate analysis visualizations"""
-        viz_paths = {}
-        
-        # Calculate FPS from time_sec differences for later use
-        time_diffs = ball_df['time_sec'].diff().dropna()
-        if len(time_diffs) > 0:
-            avg_frame_time = time_diffs.mean()
-            fps = 1 / avg_frame_time if avg_frame_time > 0 else 30  # Default to 30 if can't calculate
-        else:
-            fps = 30  # Default
-        
-        # Ball trajectory heatmap
-        plt.figure(figsize=(10, 8))
-        sns.heatmap(
-            pd.crosstab(
-                pd.cut(ball_df['y'], bins=20),
-                pd.cut(ball_df['x'], bins=20)
-            ),
-            cmap='hot'
-        )
-        plt.title('Ball Position Heatmap')
-        viz_paths['ball_heatmap'] = os.path.join(output_dir, 'ball_heatmap.png')
-        plt.savefig(viz_paths['ball_heatmap'])
-        plt.close()
-        
-        # Player movement heatmap
-        plt.figure(figsize=(10, 8))
-        for player_id in player_df['player_id'].unique():
-            player_data = player_df[player_df['player_id'] == player_id]
-            plt.scatter(player_data['x'], player_data['y'], 
-                       alpha=0.5, label=f'Player {player_id}')
-        plt.title('Player Court Coverage')
-        plt.xlabel('X Position')
-        plt.ylabel('Y Position')
-        plt.legend()
-        viz_paths['player_coverage'] = os.path.join(output_dir, 'player_coverage.png')
-        plt.savefig(viz_paths['player_coverage'])
-        plt.close()
-        
-        # Ball speed over time
-        plt.figure(figsize=(12, 6))
-        smoothed_speed = savgol_filter(ball_df['speed'], 
-                                      min(51, len(ball_df) - len(ball_df) % 2 - 1), 3)
-        plt.plot(ball_df['time_sec'], smoothed_speed)
-        plt.title('Ball Speed Over Time')
-        plt.xlabel('Time (seconds)')
-        plt.ylabel('Speed (pixels/frame)')
-        plt.grid(True, alpha=0.3)
-        viz_paths['ball_speed'] = os.path.join(output_dir, 'ball_speed.png')
-        plt.savefig(viz_paths['ball_speed'])
-        plt.close()
-        
-        # Enhanced shot analysis visualizations if shot data available
-        self._generate_shot_visualizations(ball_df, output_dir, viz_paths)
-        
-        # Player distance from center over time
-        plt.figure(figsize=(12, 6))
-        # Calculate court center
-        court_center_x = player_df['x'].mean()
-        court_center_y = player_df['y'].mean()
-        
-        for player_id in player_df['player_id'].unique():
-            player_data = player_df[player_df['player_id'] == player_id]
-            # Calculate distance from center
-            player_data['center_distance'] = np.sqrt(
-                (player_data['x'] - court_center_x)**2 + 
-                (player_data['y'] - court_center_y)**2
-            )
-            # Smooth the distance
-            if len(player_data) > 10:
-                smoothed_distance = savgol_filter(
-                    player_data['center_distance'],
-                    min(51, len(player_data) - len(player_data) % 2 - 1), 3
-                )
-                plt.plot(player_data['time_sec'], smoothed_distance, 
-                       label=f'Player {player_id}')
-        
-        plt.title('Player Distance from Court Center')
-        plt.xlabel('Time (seconds)')
-        plt.ylabel('Distance (pixels)')
-        plt.legend()
-        plt.grid(True, alpha=0.3)
-        viz_paths['center_distance'] = os.path.join(output_dir, 'center_distance.png')
-        plt.savefig(viz_paths['center_distance'])
-        plt.close()
-        
-        # Player heatmaps (one for each player)
-        for player_id in player_df['player_id'].unique():
-            player_data = player_df[player_df['player_id'] == player_id]
-            plt.figure(figsize=(10, 8))
-            sns.kdeplot(
-                x=player_data['x'],
-                y=player_data['y'],
-                cmap='viridis',
-                fill=True,
-                bw_adjust=0.7
-            )
-            plt.title(f'Player {player_id} Court Coverage Heatmap')
-            plt.xlabel('X Position')
-            plt.ylabel('Y Position')
-            player_heatmap_path = os.path.join(output_dir, f'player{player_id}_heatmap.png')
-            viz_paths[f'player{player_id}_heatmap'] = player_heatmap_path
-            plt.savefig(player_heatmap_path)
-            plt.close()
-            
-        # Court region distribution pie charts
-        for player_id in player_df['player_id'].unique():
-            player_data = player_df[player_df['player_id'] == player_id]
-            plt.figure(figsize=(8, 8))
-            region_counts = player_data['court_region'].value_counts()
-            plt.pie(region_counts, labels=region_counts.index, autopct='%1.1f%%')
-            plt.title(f'Player {player_id} Court Region Distribution')
-            region_chart_path = os.path.join(output_dir, f'player{player_id}_regions.png')
-            viz_paths[f'player{player_id}_regions'] = region_chart_path
-            plt.savefig(region_chart_path)
-            plt.close()
-            
-        # Side preference distribution pie charts
-        for player_id in player_df['player_id'].unique():
-            player_data = player_df[player_df['player_id'] == player_id]
-            plt.figure(figsize=(8, 8))
-            side_counts = player_data['court_side'].value_counts()
-            plt.pie(side_counts, labels=side_counts.index, autopct='%1.1f%%')
-            plt.title(f'Player {player_id} Court Side Preference')
-            side_chart_path = os.path.join(output_dir, f'player{player_id}_sides.png')
-            viz_paths[f'player{player_id}_sides'] = side_chart_path
-            plt.savefig(side_chart_path)
-            plt.close()
-            
-        # Generate summary statistics table
-        plt.figure(figsize=(12, 8))
-        plt.axis('off')
-        
-        # Create summary statistics
-        summary_data = []
-        
-        # Game duration
-        duration = ball_df['time_sec'].max()
-        summary_data.append(["Game Duration", f"{duration:.2f} seconds"])
-        
-        # Ball statistics
-        avg_speed = ball_df['speed'].mean()
-        max_speed = ball_df['speed'].max()
-        ball_front = (ball_df['court_region'] == 'Front').mean() * 100
-        ball_middle = (ball_df['court_region'] == 'Middle').mean() * 100
-        ball_back = (ball_df['court_region'] == 'Back').mean() * 100
-        ball_left = (ball_df['court_side'] == 'Left').mean() * 100
-        ball_right = (ball_df['court_side'] == 'Right').mean() * 100
-        
-        summary_data.extend([
-            ["Average Ball Speed", f"{avg_speed:.2f} pixels/frame"],
-            ["Maximum Ball Speed", f"{max_speed:.2f} pixels/frame"],
-            ["Ball in Front Court", f"{ball_front:.1f}%"],
-            ["Ball in Middle Court", f"{ball_middle:.1f}%"],
-            ["Ball in Back Court", f"{ball_back:.1f}%"],
-            ["Ball on Left Side", f"{ball_left:.1f}%"],
-            ["Ball on Right Side", f"{ball_right:.1f}%"],
-        ])
-        
-        # Shot statistics if available
-        if 'shot_detected' in ball_df.columns:
-            shot_detected_count = ball_df[ball_df['shot_detected'] == True].shape[0]
-            summary_data.append(["Detected Shots", f"{shot_detected_count}"])
-            
-            # Add shot type counts
-            if 'shot_type' in ball_df.columns:
-                shot_types = ball_df[ball_df['shot_detected'] == True]['shot_type'].value_counts()
-                for shot_type, count in shot_types.items():
-                    if shot_type != "None":
-                        summary_data.append([f"{shot_type} Shots", f"{count}"])
-        
-        # Player statistics
-        for player_id in player_df['player_id'].unique():
-            player_data = player_df[player_df['player_id'] == player_id]
-            
-            # Calculate player movement
-            if 'total_distance_moved' in player_data.columns:
-                movement = player_data['total_distance_moved'].max()
-            else:
-                movement = 0
-                for i in range(1, len(player_data)):
-                    if i > 0 and player_data.iloc[i-1]['frame'] + 1 == player_data.iloc[i]['frame']:
-                        # Continuous frames, calculate distance moved
-                        x1, y1 = player_data.iloc[i-1]['x'], player_data.iloc[i-1]['y']
-                        x2, y2 = player_data.iloc[i]['x'], player_data.iloc[i]['y']
-                        distance = np.sqrt((x2-x1)**2 + (y2-y1)**2)
-                        movement += distance
-            
-            # Court position percentages
-            front_pct = (player_data['court_region'] == 'Front').mean() * 100
-            middle_pct = (player_data['court_region'] == 'Middle').mean() * 100
-            back_pct = (player_data['court_region'] == 'Back').mean() * 100
-            left_pct = (player_data['court_side'] == 'Left').mean() * 100
-            right_pct = (player_data['court_side'] == 'Right').mean() * 100
-            
-            summary_data.extend([
-                [f"Player {player_id} Total Movement", f"{movement:.2f} pixels"],
-                [f"Player {player_id} in Front Court", f"{front_pct:.1f}%"],
-                [f"Player {player_id} in Middle Court", f"{middle_pct:.1f}%"],
-                [f"Player {player_id} in Back Court", f"{back_pct:.1f}%"],
-                [f"Player {player_id} on Left Side", f"{left_pct:.1f}%"],
-                [f"Player {player_id} on Right Side", f"{right_pct:.1f}%"],
-            ])
-            
-            # Add advanced player metrics if available
-            if 'avg_recovery_time' in player_data.columns:
-                avg_recovery = player_data['avg_recovery_time'].mean()
-                if not np.isnan(avg_recovery):
-                    summary_data.append([f"Player {player_id} Avg Recovery Time", f"{avg_recovery:.2f} seconds"])
-                    
-            if 'direction_changes' in player_data.columns:
-                direction_changes = player_data['direction_changes'].max()
-                summary_data.append([f"Player {player_id} Direction Changes", f"{direction_changes}"])
-            
-        # Create a table with the summary statistics
-        table = plt.table(
-            cellText=summary_data,
-            colWidths=[0.3, 0.7],
-            loc='center',
-            cellLoc='left'
-        )
-        table.auto_set_font_size(False)
-        table.set_fontsize(12)
-        table.scale(1, 1.5)
-        
-        for (row, col), cell in table.get_celld().items():
-            if row == 0:
-                cell.set_text_props(fontproperties=FontProperties(weight='bold'))
-            cell.set_edgecolor('lightgrey')
-            
-        plt.title('Game Summary Statistics', fontsize=16, pad=20)
-        summary_path = os.path.join(output_dir, 'game_summary.png')
-        viz_paths['game_summary'] = summary_path
-        plt.savefig(summary_path, bbox_inches='tight', dpi=150)
-        plt.close()
-        
-        # Save summary statistics as CSV
-        summary_df = pd.DataFrame(summary_data, columns=['Metric', 'Value'])
-        summary_csv = os.path.join(output_dir, 'game_summary.csv')
-        summary_df.to_csv(summary_csv, index=False)
-        viz_paths['summary_csv'] = summary_csv
-        
-        return viz_paths
         
     def _generate_shot_visualizations(self, ball_df: pd.DataFrame, output_dir: str, viz_paths: Dict[str, str]) -> None:
         """Generate shot-specific visualizations"""
@@ -2729,104 +2596,104 @@ class KeypointProcessor:
                                 new_kpts_xy[j, 1] = flat_kpts[j*2+1]
                             kpts_xy = new_kpts_xy
 
-                    # Assign xy coordinates safely
-                    try:
-                        kpts_array[:, 0:2] = kpts_xy
-                    except Exception as e:
-                        logger.error(f"Failed to assign keypoints xy to output array: {e}")
-                        # Fallback: copy element by element
-                        for j in range(min(num_keypoints, kpts_xy.shape[0])):
-                            if j < kpts_xy.shape[0] and kpts_xy.shape[1] >= 2:
-                                kpts_array[j, 0] = kpts_xy[j, 0]
-                                kpts_array[j, 1] = kpts_xy[j, 1]
-                        
-                    # Handle conf shape similarly to xy
-                    if hasattr(conf, 'shape'):
-                        # Handle 2D array
-                        if len(conf.shape) == 2:  # shape like (1, 17)
-                            try:
-                                conf = conf.reshape(num_keypoints)
-                            except Exception as e:
-                                logger.error(f"Failed to reshape confidence: {e}")
-                                # Create properly shaped confidence
-                                flat_conf = conf.flatten()
-                                conf = np.zeros(num_keypoints)
-                                for j in range(min(num_keypoints, len(flat_conf))):
-                                    conf[j] = flat_conf[j]
-                        # Handle 1D array with wrong length
-                        elif len(conf.shape) == 1 and conf.shape[0] != num_keypoints:
-                            # If lengths don't match, resize
-                            new_conf = np.zeros(num_keypoints)
-                            for j in range(min(num_keypoints, conf.shape[0])):
-                                new_conf[j] = conf[j]
-                            conf = new_conf
-                        else:
-                            # If conf has no shape attribute, create default conf
-                            conf = np.ones(num_keypoints) * 0.5
-                        
-                        # Assign confidence safely
+                        # Assign xy coordinates safely
                         try:
-                            kpts_array[:, 2] = conf
+                            kpts_array[:, 0:2] = kpts_xy
                         except Exception as e:
-                            logger.error(f"Failed to assign confidence to output array: {e}")
+                            logger.error(f"Failed to assign keypoints xy to output array: {e}")
                             # Fallback: copy element by element
-                            for j in range(min(num_keypoints, len(conf))):
-                                if j < len(conf):
-                                    kpts_array[j, 2] = conf[j]
-                    # If it's a numpy array already
-                    elif isinstance(keypoints, np.ndarray):
-                        kpts_array = keypoints
-                    # If it's a list
-                    elif isinstance(keypoints, list):
-                        kpts_array = np.array(keypoints)
-                    # If it's a tensor or other object
-                    else:
-                        # Try to convert to numpy array through different paths
-                        try:
-                            if hasattr(keypoints, 'cpu'):
-                                cpu_keypoints = keypoints.cpu()
-                                if hasattr(cpu_keypoints, 'numpy'):
-                                    kpts_array = cpu_keypoints.numpy()
-                                elif hasattr(cpu_keypoints, 'detach'):
-                                    kpts_array = cpu_keypoints.detach().numpy()
-                            elif hasattr(keypoints, 'numpy'):
-                                kpts_array = keypoints.numpy()
-                        except Exception as e:
-                            logger.warning(f"Failed to convert keypoints to numpy array: {e}")
+                            for j in range(min(num_keypoints, kpts_xy.shape[0])):
+                                if j < kpts_xy.shape[0] and kpts_xy.shape[1] >= 2:
+                                    kpts_array[j, 0] = kpts_xy[j, 0]
+                                    kpts_array[j, 1] = kpts_xy[j, 1]
+                        
+                        # Handle conf shape similarly to xy
+                        if hasattr(conf, 'shape'):
+                            # Handle 2D array
+                            if len(conf.shape) == 2:  # shape like (1, 17)
+                                try:
+                                    conf = conf.reshape(num_keypoints)
+                                except Exception as e:
+                                    logger.error(f"Failed to reshape confidence: {e}")
+                                    # Create properly shaped confidence
+                                    flat_conf = conf.flatten()
+                                    conf = np.zeros(num_keypoints)
+                                    for j in range(min(num_keypoints, len(flat_conf))):
+                                        conf[j] = flat_conf[j]
+                            # Handle 1D array with wrong length
+                            elif len(conf.shape) == 1 and conf.shape[0] != num_keypoints:
+                                # If lengths don't match, resize
+                                new_conf = np.zeros(num_keypoints)
+                                for j in range(min(num_keypoints, conf.shape[0])):
+                                    new_conf[j] = conf[j]
+                                conf = new_conf
+                            else:
+                                # If conf has no shape attribute, create default conf
+                                conf = np.ones(num_keypoints) * 0.5
+                            
+                            # Assign confidence safely
+                            try:
+                                kpts_array[:, 2] = conf
+                            except Exception as e:
+                                logger.error(f"Failed to assign confidence to output array: {e}")
+                                # Fallback: copy element by element
+                                for j in range(min(num_keypoints, len(conf))):
+                                    if j < len(conf):
+                                        kpts_array[j, 2] = conf[j]
+                        # If it's a numpy array already
+                        elif isinstance(keypoints, np.ndarray):
+                            kpts_array = keypoints
+                        # If it's a list
+                        elif isinstance(keypoints, list):
+                            kpts_array = np.array(keypoints)
+                        # If it's a tensor or other object
+                        else:
+                            # Try to convert to numpy array through different paths
+                            try:
+                                if hasattr(keypoints, 'cpu'):
+                                    cpu_keypoints = keypoints.cpu()
+                                    if hasattr(cpu_keypoints, 'numpy'):
+                                        kpts_array = cpu_keypoints.numpy()
+                                    elif hasattr(cpu_keypoints, 'detach'):
+                                        kpts_array = cpu_keypoints.detach().numpy()
+                                elif hasattr(keypoints, 'numpy'):
+                                    kpts_array = keypoints.numpy()
+                            except Exception as e:
+                                logger.warning(f"Failed to convert keypoints to numpy array: {e}")
+                                return
+                        
+                        # If conversion failed or keypoints array is empty
+                        if kpts_array is None or len(kpts_array) == 0:
+                            logger.warning("Empty keypoints array or conversion failed")
                             return
-                    
-                    # If conversion failed or keypoints array is empty
-                    if kpts_array is None or len(kpts_array) == 0:
-                        logger.warning("Empty keypoints array or conversion failed")
-                        return
                         
-                    # Draw keypoints
-                    for i, kp in enumerate(kpts_array):
-                        # Check if keypoint has enough elements for x, y, confidence
-                        if len(kp) < 3:
-                            continue
+                        # Draw keypoints
+                        for i, kp in enumerate(kpts_array):
+                            # Check if keypoint has enough elements for x, y, confidence
+                            if len(kp) < 3:
+                                continue
+                            
+                            # Check confidence threshold
+                            conf = float(kp[2])  # Ensure it's a float
+                            if conf > 0.5:  # Only draw if confidence > 0.5
+                                x, y = int(float(kp[0])), int(float(kp[1]))  # Ensure they're integers
+                                cv2.circle(frame, (x, y), 4, color, -1)
                         
-                        # Check confidence threshold
-                        conf = float(kp[2])  # Ensure it's a float
-                        if conf > 0.5:  # Only draw if confidence > 0.5
-                            x, y = int(float(kp[0])), int(float(kp[1]))  # Ensure they're integers
-                            cv2.circle(frame, (x, y), 4, color, -1)
-                    
-                    # Draw skeleton
-                    for pair in KeypointProcessor.SKELETON:
-                        # Skip invalid indices
-                        if pair[0] >= len(kpts_array) or pair[1] >= len(kpts_array):
-                            continue
-                        
-                        pt1 = kpts_array[pair[0]]
-                        pt2 = kpts_array[pair[1]]
-                        
-                        # Check if keypoints have enough elements and meet confidence threshold
-                        if (len(pt1) >= 3 and len(pt2) >= 3 and 
-                            float(pt1[2]) > 0.5 and float(pt2[2]) > 0.5):  # Only draw if both points are confident
-                            x1, y1 = int(float(pt1[0])), int(float(pt1[1]))
-                            x2, y2 = int(float(pt2[0])), int(float(pt2[1]))
-                            cv2.line(frame, (x1, y1), (x2, y2), color, 2)
+                        # Draw skeleton
+                        for pair in KeypointProcessor.SKELETON:
+                            # Skip invalid indices
+                            if pair[0] >= len(kpts_array) or pair[1] >= len(kpts_array):
+                                continue
+                            
+                            pt1 = kpts_array[pair[0]]
+                            pt2 = kpts_array[pair[1]]
+                            
+                            # Check if keypoints have enough elements and meet confidence threshold
+                            if (len(pt1) >= 3 and len(pt2) >= 3 and 
+                                float(pt1[2]) > 0.5 and float(pt2[2]) > 0.5):  # Only draw if both points are confident
+                                x1, y1 = int(float(pt1[0])), int(float(pt1[1]))
+                                x2, y2 = int(float(pt2[0])), int(float(pt2[1]))
+                                cv2.line(frame, (x1, y1), (x2, y2), color, 2)
         except Exception as e:
             logger.warning(f"Error drawing skeleton: {e}")
             logger.warning(f"Keypoint type: {type(keypoints)}")
@@ -2869,8 +2736,12 @@ class ShotClassifier:
         self.position_history = deque(maxlen=10)  # Store recent positions
         self.classified_shots = []  # Store classified shot details
         self.last_shot_frame = -20  # Prevent multiple detections of same shot
+
+        # Rally tracking
         self.rally_shots = []  # Track shots in current rally
         self.current_rally = 0  # Rally counter
+        self.rallies_data: Dict[int, List[Dict]] = {} # Store detailed rally info {rally_id: [shot_info, ...]}
+        self.last_shot_time = 0.0
         
     def set_court_dimensions(self, width, height):
         """Set court dimensions for normalization"""
@@ -2878,7 +2749,7 @@ class ShotClassifier:
     
     def detect_and_classify_shot(self, frame_number, position, velocity, velocity_change, 
                               court_region, court_side, time_sec, confidence=1.0,
-                              player_positions=None) -> Tuple[bool, str, float]:
+                              player_positions=None) -> Dict[str, Any]:
         """
         Detect if a shot occurred and classify its type
         
@@ -2894,258 +2765,271 @@ class ShotClassifier:
             player_positions: Optional dict of player positions {id: (x,y)}
             
         Returns:
-            Tuple of (shot_detected, shot_type, shot_confidence)
+            Dictionary containing shot detection results:
+            {
+                'detected': bool, 'type': str, 'confidence': float,
+                'rally_id': int, 'closest_player_id': Optional[int]
+            }
         """
         # Update history
-        self.velocity_history.append(velocity)
-        self.position_history.append(position)
-        
-        # Shot detection - velocity change indicates contact with racket
-        shot_detected = False
-        shot_type = "None"
-        shot_confidence = 0.0
-        
+        if velocity is not None and not np.any(np.isnan(velocity)): # Avoid adding NaN velocities
+             self.velocity_history.append(velocity)
+        if position is not None and not np.any(np.isnan(position)):
+             self.position_history.append(position)
+
+        # Result dictionary
+        result = {
+             'detected': False, 'type': "None", 'confidence': 0.0,
+             'rally_id': self.current_rally, 'closest_player_id': None
+        }
+
+        # Check for rally end based on time since last shot
+        if self.rally_shots and time_sec - self.last_shot_time > 3.0:
+            # End of rally
+            if len(self.rally_shots) > 1: # Only finalize if it was a real rally
+                self.rallies_data[self.current_rally] = self.rally_shots.copy()
+                logger.info(f"Rally {self.current_rally} ended. Length: {len(self.rally_shots)} shots.")
+                self.current_rally += 1
+            # Reset rally shots regardless
+            self.rally_shots = []
+
+        # Determine closest player before shot classification
+        closest_player_id = None
+        min_distance = float('inf')
+        player_making_shot = None
+        if player_positions:
+            for p_id, player_pos in player_positions.items():
+                if player_pos:
+                    dist = spatial_distance.euclidean(position, player_pos)
+                    if dist < min_distance:
+                        min_distance = dist
+                        closest_player_id = p_id
+            # Assign player if close enough
+            if min_distance < 120: # Threshold for player hitting ball
+                 player_making_shot = closest_player_id
+                 result['closest_player_id'] = player_making_shot
+
         # Detect shots based on significant velocity changes and ensure it's not too close to previous shot
-        if (velocity_change > self.velocity_change_threshold and 
-            frame_number - self.last_shot_frame > 15 and 
-            confidence > 0.5):
-            
+        # Also require decent ball confidence
+        if (velocity_change > self.velocity_change_threshold and
+            frame_number - self.last_shot_frame > 10 and # Reduced refractory period slightly
+            confidence > 0.4): # Slightly lower confidence acceptable if velocity change is high
+
             shot_detected = True
+            result['detected'] = True
             self.last_shot_frame = frame_number
-            
+            self.last_shot_time = time_sec # Update last shot time for rally tracking
+
             # Extract ball dynamics for classification
-            speed = np.sqrt(velocity[0]**2 + velocity[1]**2)
-            trajectory_angle = np.arctan2(velocity[1], velocity[0]) * 180 / np.pi
-            
-            # Basic shot classification logic
-            if speed < self.min_speed_threshold:
-                # Too slow for reliable classification
-                shot_type = "Unknown"
-                shot_confidence = 0.3
-            else:
-                # Classify based on court region, velocity and angle
+            speed = np.linalg.norm(velocity) if velocity is not None else 0 # Use numpy norm for speed
+            trajectory_angle = np.arctan2(velocity[1], velocity[0]) * 180 / np.pi if velocity is not None and velocity[0] != 0 else 0
+
+            # --- Shot Classification Logic ---
+            shot_type = "Unknown" # Default
+            shot_confidence = 0.5 # Base confidence
+
+            # Basic logic based on speed, direction, court position
+            if speed < self.min_speed_threshold * 0.8: # Lower speed threshold slightly for drops/lobs
+                if velocity is not None and velocity[1] < -5: # Moving upwards significantly
+                    shot_type = "Lob"
+                    shot_confidence = 0.7
+                else:
+                    shot_type = "Drop"
+                    shot_confidence = 0.7
+            elif velocity is not None: # Faster shots, ensure velocity is valid
                 if court_region == "Front":
-                    if velocity[1] < -10:  # Ball moving up
-                        if abs(velocity[0]) > 20:  # Significant horizontal component
-                            shot_type = "Crosscourt"
-                            shot_confidence = 0.8
-                        else:
-                            shot_type = "Lob"
-                            shot_confidence = 0.85
-                    elif abs(velocity[0]) > 20:  # Strong horizontal
-                        shot_type = "Boast"
-                        shot_confidence = 0.75
-                    else:
-                        shot_type = "Drop"
+                    if velocity[1] < -8: # Moving up -> Lob/Crosscourt
+                        shot_type = "Lob" if abs(velocity[0]) < 15 else "Crosscourt"
                         shot_confidence = 0.8
-                        
-                elif court_region == "Middle":
-                    if abs(velocity[0]) > 20 and abs(velocity[1]) < 10:
-                        shot_type = "Volley"
+                    elif abs(velocity[0]) > 20: # Sideways -> Boast/Volley
+                        shot_type = "Boast" if abs(trajectory_angle) > 45 else "Volley"
                         shot_confidence = 0.75
-                    elif velocity[1] > 15:  # Downward trajectory
-                        shot_type = "Kill"
+                    else: # Mostly forward/down -> Drop/Volley
+                        shot_type = "Drop" if speed < 15 else "Volley"
+                        shot_confidence = 0.8
+
+                elif court_region == "Middle":
+                    if abs(velocity[0]) > 20 and abs(velocity[1]) < 10: # Flat and fast -> Volley/Drive
+                        shot_type = "Volley" # Assume volley from middle unless proven otherwise
+                        shot_confidence = 0.75
+                    elif velocity[1] > 15: # Downward trajectory -> Kill/Drive
+                        shot_type = "Kill" if speed > 25 else "Drive"
                         shot_confidence = 0.7
-                    else:
+                    else: # Default middle court -> Drive
                         shot_type = "Drive"
                         shot_confidence = 0.7
-                        
+
                 elif court_region == "Back":
-                    if velocity[1] < -12:  # Upward trajectory
+                    if velocity[1] < -12: # Upward trajectory -> Lob
                         shot_type = "Lob"
                         shot_confidence = 0.85
-                    elif abs(velocity[0]) > 25:  # Strong horizontal
-                        if abs(trajectory_angle) < 30:  # Relatively flat
-                            shot_type = "Drive"
-                            shot_confidence = 0.9
-                        else:
-                            shot_type = "Crosscourt"
-                            shot_confidence = 0.8
-                    else:
-                        # Default to drive for back court shots
+                    elif abs(velocity[0]) > 20: # Fast horizontal -> Drive/Crosscourt
+                        shot_type = "Drive" if abs(trajectory_angle) < 30 else "Crosscourt"
+                        shot_confidence = 0.85
+                    else: # Default back court -> Drive
                         shot_type = "Drive"
                         shot_confidence = 0.6
-            
-            # Improve classification with player position context if available
-            if player_positions:
-                # Find the closest player to the ball (likely the one making the shot)
-                closest_player_id = None
-                min_distance = float('inf')
-                
-                for player_id, player_pos in player_positions.items():
-                    if player_pos:
-                        dist = np.sqrt((position[0] - player_pos[0])**2 + (position[1] - player_pos[1])**2)
-                        if dist < min_distance:
-                            min_distance = dist
-                            closest_player_id = player_id
-                
-                # If a player is close enough to be hitting the ball
-                if closest_player_id and min_distance < 120:
-                    # Adjust classification based on player's court position
-                    player_pos = player_positions[closest_player_id]
-                    player_region = self._get_region(player_pos[1])
-                    player_side = self._get_side(player_pos[0])
-                    
-                    # Refine shot classification based on player position
-                    if player_region == "Front" and shot_type == "Drive":
-                        # Likely not a drive if player is in front court
-                        shot_type = "Volley" if abs(velocity[1]) < 10 else "Crosscourt"
-                        shot_confidence -= 0.1  # Reduced confidence due to adjustment
-                        
-                    elif player_region == "Back" and shot_type == "Drop":
-                        # Unlikely to play a drop from back court
-                        shot_type = "Lob" if velocity[1] < 0 else "Drive"
-                        shot_confidence -= 0.1
-                        
-                    # Serve detection (rally start)
-                    if len(self.rally_shots) == 0 and player_region == "Back":
-                        shot_type = "Serve"
-                        shot_confidence += 0.1
-            
+
+            # Refine classification with player position context
+            if player_making_shot and velocity is not None:
+                player_pos = player_positions[player_making_shot]
+                player_region = self._get_region(player_pos[1])
+                # player_side = self._get_side(player_pos[0]) # Side not used currently
+
+                # Refine shot classification based on player position
+                if player_region == "Front" and shot_type in ["Drive", "Kill"]:
+                    shot_type = "Volley" # More likely a volley
+                    shot_confidence = max(0.1, shot_confidence - 0.1)
+                elif player_region == "Back" and shot_type == "Drop":
+                    shot_type = "Lob" if velocity[1] < 0 else "Drive" # Unlikely drop
+                    shot_confidence = max(0.1, shot_confidence - 0.1)
+                elif player_region == "Middle" and shot_type == "Drop" and speed > 15:
+                     shot_type = "Volley" # Could be a soft volley
+                     shot_confidence = max(0.1, shot_confidence - 0.05)
+
+                # Serve detection (first shot of rally, player in back corner)
+                if len(self.rally_shots) == 0 and player_region == "Back":
+                    shot_type = "Serve"
+                    shot_confidence = min(1.0, shot_confidence + 0.2) # Increase confidence for serve
+
+            # Store results
+            result['type'] = shot_type
+            result['confidence'] = round(shot_confidence, 2)
+
             # Store shot details for rally analysis
             shot_info = {
                 'frame': frame_number,
                 'time': time_sec,
                 'position': position,
                 'velocity': velocity,
-                'type': shot_type,
+                'type': result['type'],
+                'confidence': result['confidence'],
                 'region': court_region,
                 'side': court_side,
-                'confidence': shot_confidence,
-                'rally': self.current_rally
+                'rally_id': self.current_rally,
+                'player_id': player_making_shot # Attribute shot to player
             }
             self.classified_shots.append(shot_info)
-            self.rally_shots.append(shot_info)
-            
-        # Check for rally end (long time without shots)
-        if self.rally_shots and time_sec - self.rally_shots[-1]['time'] > 3.0:
-            # End of rally
-            if len(self.rally_shots) > 1:
-                # Only count as rally if multiple shots
-                self.current_rally += 1
-            # Reset rally shots
-            self.rally_shots = []
-            
-        return shot_detected, shot_type, shot_confidence
-    
+            self.rally_shots.append(shot_info) # Add to current rally buffer
+
+        return result
+
     def get_shot_statistics(self) -> Dict[str, Any]:
         """
-        Get comprehensive shot statistics
-        
+        Get comprehensive shot statistics after processing is complete.
+        This should be called once at the end.
+
         Returns:
             Dictionary with shot statistics
         """
         if not self.classified_shots:
             return {
                 'total_shots': 0,
-                'shot_types': {},
-                'shots_by_region': {},
-                'shots_by_side': {},
-                'rally_count': 0,
-                'avg_rally_length': 0,
-                'max_rally_length': 0
+                'shot_types_count': {},
+                'shots_by_region_count': {},
+                'shots_by_side_count': {},
+                'rally_stats': {'count': 0},
+                'common_transitions': {}
             }
-        
-        # Count shots by type
-        shot_types = {}
-        for shot in self.classified_shots:
-            shot_type = shot['type']
-            shot_types[shot_type] = shot_types.get(shot_type, 0) + 1
-            
+
+        # Finalize the last rally if it exists
+        if self.rally_shots and len(self.rally_shots) > 1:
+             self.rallies_data[self.current_rally] = self.rally_shots.copy()
+
+        # Count shots by type using Counter for efficiency
+        shot_types = Counter(shot['type'] for shot in self.classified_shots if shot['type'] != "None")
+
         # Count shots by region
-        shots_by_region = {}
-        for shot in self.classified_shots:
-            region = shot['region']
-            shots_by_region[region] = shots_by_region.get(region, 0) + 1
-            
+        shots_by_region = Counter(shot['region'] for shot in self.classified_shots)
+
         # Count shots by side
-        shots_by_side = {}
-        for shot in self.classified_shots:
-            side = shot['side']
-            shots_by_side[side] = shots_by_side.get(side, 0) + 1
-            
+        shots_by_side = Counter(shot['side'] for shot in self.classified_shots)
+
         # Analyze rallies
-        rallies = {}
-        for shot in self.classified_shots:
-            rally_id = shot['rally']
-            if rally_id in rallies:
-                rallies[rally_id].append(shot)
-            else:
-                rallies[rally_id] = [shot]
-                
+        rally_lengths = [len(r) for r in self.rallies_data.values() if len(r) > 1] # Rallies must have > 1 shot
+        rally_durations = []
+        shot_transitions = Counter()
+        for rally_id, shots in self.rallies_data.items():
+             if len(shots) > 1:
+                 start_time = shots[0]['time']
+                 end_time = shots[-1]['time']
+                 rally_durations.append(end_time - start_time)
+                 # Analyze transitions within the rally
+                 for i in range(len(shots) - 1):
+                     # Transition based on shot type
+                     # transition = f"{shots[i]['type']} -> {shots[i+1]['type']}"
+                     # Transition based on court region
+                     transition = f"{shots[i]['region']}-{shots[i]['side']} -> {shots[i+1]['region']}-{shots[i+1]['side']}"
+                     shot_transitions[transition] += 1
+
         # Calculate rally statistics
-        rally_lengths = [len(r) for r in rallies.values() if len(r) > 1]
-        
+        rally_stats = {
+            'count': len(rally_lengths),
+            'avg_length_shots': np.mean(rally_lengths) if rally_lengths else 0,
+            'max_length_shots': max(rally_lengths) if rally_lengths else 0,
+            'shots_per_rally_dist': {
+                'median': np.median(rally_lengths) if rally_lengths else 0,
+                'std': np.std(rally_lengths) if rally_lengths else 0,
+                # Use list comprehension for safety if rally_lengths is empty
+                'percentiles': np.percentile(rally_lengths, [25, 50, 75, 90]).tolist() if rally_lengths else [0.0, 0.0, 0.0, 0.0]
+            },
+            'avg_duration_sec': np.mean(rally_durations) if rally_durations else 0,
+            'max_duration_sec': max(rally_durations) if rally_durations else 0,
+            'rally_lengths': rally_lengths # Keep raw lengths for visualization
+        }
+
+        # Get common transitions
+        common_transitions = dict(shot_transitions.most_common(5))
+
         return {
             'total_shots': len(self.classified_shots),
-            'shot_types': shot_types,
-            'shots_by_region': shots_by_region,
-            'shots_by_side': shots_by_side,
-            'rally_count': len(rallies),
-            'avg_rally_length': np.mean(rally_lengths) if rally_lengths else 0,
-            'max_rally_length': max(rally_lengths) if rally_lengths else 0,
-            'shots_per_rally': np.percentile(rally_lengths, [25, 50, 75, 90]) if rally_lengths else [0, 0, 0, 0]
+            'shot_types_count': dict(shot_types), # Convert Counter to dict
+            'shots_by_region_count': dict(shots_by_region), # Convert Counter to dict
+            'shots_by_side_count': dict(shots_by_side), # Convert Counter to dict
+            'rally_stats': rally_stats,
+            'common_transitions': common_transitions
         }
-    
+
     def get_player_shot_distribution(self, player_id: int, player_positions_history: List[Dict[int, Tuple[float, float]]]) -> Dict[str, Any]:
         """
         Get shot distribution for a specific player
-        
+
         Args:
             player_id: ID of player to analyze
             player_positions_history: List of dictionary mapping player IDs to positions at each frame
-            
+
         Returns:
             Dictionary with player-specific shot statistics
         """
-        if not self.classified_shots or not player_positions_history:
+        # This function might be less necessary if shots are attributed directly in shot_info
+        # Kept for potential alternative analysis
+        if not self.classified_shots:
             return {
                 'total_shots': 0,
-                'shot_types': {},
-                'shots_by_region': {}
+                'shot_types_count': {},
+                'shots_by_region_count': {}
             }
-        
-        # Find shots likely played by this player
-        player_shots = []
-        for shot in self.classified_shots:
-            frame = shot['frame']
-            if frame < len(player_positions_history):
-                positions = player_positions_history[frame]
-                if player_id in positions:
-                    player_pos = positions[player_id]
-                    shot_pos = shot['position']
-                    
-                    # Calculate distance between player and shot
-                    distance = np.sqrt((player_pos[0] - shot_pos[0])**2 + 
-                                      (player_pos[1] - shot_pos[1])**2)
-                    
-                    # If player is close enough, likely their shot
-                    if distance < 120:
-                        player_shots.append(shot)
-        
-        # Count shots by type
-        shot_types = {}
-        for shot in player_shots:
-            shot_type = shot['type']
-            shot_types[shot_type] = shot_types.get(shot_type, 0) + 1
-            
-        # Count shots by region
-        shots_by_region = {}
-        for shot in player_shots:
-            region = shot['region']
-            shots_by_region[region] = shots_by_region.get(region, 0) + 1
-            
+
+        # Find shots likely played by this player (using attributed ID)
+        player_shots = [shot for shot in self.classified_shots if shot.get('player_id') == player_id]
+
+        # Count shots by type using Counter
+        shot_types = Counter(shot['type'] for shot in player_shots if shot['type'] != "None")
+
+        # Count shots by region using Counter
+        shots_by_region = Counter(shot['region'] for shot in player_shots)
+
         return {
             'total_shots': len(player_shots),
-            'shot_types': shot_types,
-            'shots_by_region': shots_by_region
+            'shot_types_count': dict(shot_types),
+            'shots_by_region_count': dict(shots_by_region)
         }
-    
+
     def _get_region(self, y: float) -> str:
         """Helper to get court region from y position"""
         if not self.court_dimensions:
             return "Middle"
-            
+
         height = self.court_dimensions[1]
         if y < height * 0.33:
             return "Front"
@@ -3153,14 +3037,126 @@ class ShotClassifier:
             return "Middle"
         else:
             return "Back"
-    
+
     def _get_side(self, x: float) -> str:
         """Helper to get court side from x position"""
         if not self.court_dimensions:
-            return "Middle"
-            
+            return "Middle" # Changed default to Middle
+
         width = self.court_dimensions[0]
         return "Left" if x < width / 2 else "Right"
+
+# =============== Visualization Helpers ===============
+
+class BallViz:
+    """Helpers for visualizing ball information"""
+    @staticmethod
+    def draw_ball_info(frame, ball_data):
+        if not ball_data or ball_data.get('position') is None:
+            return
+
+        pos = ball_data['position']
+        conf = ball_data['confidence']
+        estimated = ball_data['estimated']
+        velocity = ball_data['velocity']
+        shot_detected = ball_data['shot_detected']
+        shot_type = ball_data['shot_type']
+        shot_conf = ball_data['shot_confidence']
+
+        # Ensure position is integer tuple for drawing
+        try:
+             center_x, center_y = int(pos[0]), int(pos[1])
+             # Check bounds
+             if not (0 <= center_x < frame.shape[1] and 0 <= center_y < frame.shape[0]):
+                  return # Don't draw if out of bounds
+        except (TypeError, ValueError):
+             logger.warning(f"Invalid ball position for drawing: {pos}")
+             return
+
+        color = (0, 165, 255) if estimated else (0, 255, 0) # Orange if estimated, Green if detected
+        cv2.circle(frame, (center_x, center_y), 5, color, -1)
+        cv2.putText(frame, f"B({conf:.2f})", (center_x + 10, center_y - 10), # Shorter text 'B'
+                   cv2.FONT_HERSHEY_SIMPLEX, 0.4, color, 1)
+
+        # Draw velocity vector
+        if velocity and np.linalg.norm(velocity) > 1: # Only draw if moving noticeably
+            try:
+                 end_x = int(center_x + velocity[0] * 3)
+                 end_y = int(center_y + velocity[1] * 3)
+                 # Check bounds for arrow end point
+                 if 0 <= end_x < frame.shape[1] and 0 <= end_y < frame.shape[0]:
+                      cv2.arrowedLine(frame, (center_x, center_y), (end_x, end_y), (255, 0, 255), 1) # Magenta arrow
+            except (TypeError, ValueError) as e:
+                 logger.warning(f"Invalid velocity for drawing arrow: {velocity}")
+
+
+        # Highlight shots
+        if shot_detected:
+            shot_colors = {"Drive": (255, 0, 0), "Crosscourt": (0, 165, 255), "Drop": (0, 255, 0),
+                           "Lob": (255, 0, 255), "Boast": (255, 255, 0), "Volley": (220, 20, 60), # Crimson
+                           "Kill": (128, 0, 128), "Serve": (0, 255, 255), "Unknown": (128, 128, 128)}
+            shot_color = shot_colors.get(shot_type, (128, 128, 128))
+            cv2.putText(frame, f"{shot_type}({shot_conf:.1f})", (center_x - 40, center_y - 25), # Slightly higher position
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.5, shot_color, 2)
+
+class PlayerViz:
+    """Helpers for visualizing player information"""
+    @staticmethod
+    def draw_player_info(frame, player_data):
+        # Extract data (handle potential missing keys gracefully)
+        player_id = player_data.get('player_id')
+        bbox = player_data.get('bbox')
+        center = player_data.get('center')
+        confidence = player_data.get('confidence', 0.0)
+        color = player_data.get('color', (255, 255, 255)) # Default white
+        keypoints = player_data.get('keypoints')
+        trajectory = player_data.get('trajectory', [])
+
+        if bbox is None: return # Cannot draw without bbox
+
+        try:
+             # Draw bounding box
+             x1, y1, x2, y2 = map(int, bbox)
+             # Ensure box is within frame boundaries before drawing
+             x1, y1 = max(0, x1), max(0, y1)
+             x2, y2 = min(frame.shape[1] - 1, x2), min(frame.shape[0] - 1, y2)
+             if x1 >= x2 or y1 >= y2: return # Skip invalid box
+             cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
+
+             # Draw player ID and confidence
+             if center:
+                  center_x, center_y = int(center[0]), int(center[1])
+                  # Adjust text position to be above the box
+                  text_x = x1
+                  text_y = y1 - 10 if y1 > 20 else y1 + 20 # Position above or below if near top
+                  cv2.putText(frame, f"P{player_id}({confidence:.2f})",
+                              (text_x, text_y),
+                              cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 2)
+
+             # Draw keypoints if available
+             if keypoints is not None:
+                  KeypointProcessor.draw_skeleton(frame, keypoints, color)
+
+             # Draw trajectory (last N points)
+             if len(trajectory) > 1:
+                  points_to_draw = trajectory[-15:] # Draw last 15 points
+                  for i in range(1, len(points_to_draw)):
+                       prev_pos = points_to_draw[i-1]
+                       curr_pos = points_to_draw[i]
+                       # Ensure both points are valid tuples/lists of len 2
+                       if (prev_pos and isinstance(prev_pos, (tuple, list)) and len(prev_pos) == 2 and
+                           curr_pos and isinstance(curr_pos, (tuple, list)) and len(curr_pos) == 2):
+                           try:
+                                pt1 = (int(prev_pos[0]), int(prev_pos[1]))
+                                pt2 = (int(curr_pos[0]), int(curr_pos[1]))
+                                # Check bounds before drawing line
+                                if (0 <= pt1[0] < frame.shape[1] and 0 <= pt1[1] < frame.shape[0] and
+                                    0 <= pt2[0] < frame.shape[1] and 0 <= pt2[1] < frame.shape[0]):
+                                     cv2.line(frame, pt1, pt2, color, 2)
+                           except (ValueError, TypeError) as line_err:
+                                logger.warning(f"Skipping trajectory line due to invalid points: {prev_pos}, {curr_pos} ({line_err})")
+        except Exception as draw_err:
+             logger.warning(f"Error drawing player {player_id} info: {draw_err}")
 
 def main():
     """Main entry point"""
@@ -3169,7 +3165,7 @@ def main():
                        help='Path to input video file')
     parser.add_argument('--output', type=str, default=None,
                        help='Output directory (default: timestamped directory)')
-    parser.add_argument('--ball-model', type=str, 
+    parser.add_argument('--ball-model', type=str,
                        default="trained-models/g-ball2(white_latest).pt",
                        help='Path to ball detection model')
     parser.add_argument('--player-model', type=str,
@@ -3187,16 +3183,16 @@ def main():
                        help='Disable LLM-based analysis')
     parser.add_argument('--llm-model', type=str, default="deepseek-ai/DeepSeek-R1-Distill-Qwen-14B",
                        help='Hugging Face model name for LLM analysis (default: DeepSeek-R1-Distill-Qwen-14B)')
-    
+
     args = parser.parse_args()
-    
+
     # Create output directory
     if args.output is None:
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         output_dir = os.path.join("analysis_output", f"squash_analysis_{timestamp}")
     else:
         output_dir = args.output
-    
+
     try:
         # Initialize analyzer
         analyzer = SquashAnalyzer(
@@ -3209,41 +3205,50 @@ def main():
             use_llm=not args.no_llm,
             llm_model_name=args.llm_model
         )
-        
+
         # Process video
         results = analyzer.process_video(args.video, output_dir)
-        
+
         # Print results
         print("\nAnalysis complete!")
         print(f"Output directory: {output_dir}")
         print("\nGenerated files:")
-        print(f"- Ball tracking video: {results['ball_video']}")
-        print(f"- Player tracking video: {results['player_video']}")
-        print(f"- Ball position data: {results['ball_csv']}")
-        print(f"- Player position data: {results['player_csv']}")
-        
-        if results['analysis']['visualizations']:
-            print("\nVisualizations:")
-            for name, path in results['analysis']['visualizations'].items():
-                print(f"- {name}: {path}")
-        
-        if results['analysis']['llm_analysis']:
-            print(f"\nCoach analysis: {results['analysis']['llm_analysis']}")
-        
-        # Open output directory
-        try:
-            import platform
-            import subprocess
-            
-            if platform.system() == "Windows":
-                os.startfile(output_dir)
-            elif platform.system() == "Darwin":  # macOS
-                subprocess.run(["open", output_dir])
-            else:  # Linux
-                subprocess.run(["xdg-open", output_dir])
-        except Exception as e:
-            logger.error(f"Failed to open output directory: {e}")
-        
+        if 'error' in results:
+             print(f"Analysis failed: {results['error']}")
+        else:
+            print(f"- Ball tracking video: {results.get('ball_video', 'N/A')}")
+            print(f"- Player tracking video: {results.get('player_video', 'N/A')}")
+            print(f"- Combined analysis video: {results.get('combined_video', 'N/A')}")
+            print(f"- Ball position data: {results.get('ball_csv', 'N/A')}")
+            print(f"- Player position data: {results.get('player_csv', 'N/A')}")
+
+            analysis_output = results.get('analysis', {})
+            if analysis_output.get('visualizations'):
+                print("\nVisualizations:")
+                for name, path in analysis_output['visualizations'].items():
+                    print(f"- {name}: {path}")
+
+            if analysis_output.get('llm_analysis'):
+                print(f"\nCoach analysis: {analysis_output['llm_analysis']}")
+                print(f"(Full analysis also saved to coach_analysis.html)")
+            elif analyzer.use_llm:
+                 print("\nLLM analysis was enabled but could not be generated. Check logs for errors.")
+
+            # Open output directory
+            try:
+                import platform
+                import subprocess
+
+                if platform.system() == "Windows":
+                    os.startfile(output_dir)
+                elif platform.system() == "Darwin":  # macOS
+                    subprocess.run(["open", output_dir], check=False)
+                else:  # Linux
+                    subprocess.run(["xdg-open", output_dir], check=False)
+            except Exception as e:
+                logger.error(f"Failed to open output directory automatically: {e}")
+                print(f"\nPlease manually open the output directory: {os.path.abspath(output_dir)}")
+
     except Exception as e:
         logger.error(f"Error during analysis: {str(e)}")
         traceback.print_exc()
@@ -3252,6 +3257,9 @@ def main():
         print("2. Verify that the model files exist in the specified paths")
         print("3. Ensure you have sufficient GPU memory if using GPU")
         print("4. Check the output directory permissions")
+        print("5. Ensure required libraries (torch, ultralytics, pandas, etc.) are installed correctly")
+        if args.use_llm:
+             print("6. For LLM analysis, ensure 'transformers', 'accelerate', 'bitsandbytes' are installed and you have internet access/model downloaded.")
 
 if __name__ == "__main__":
     main() 
